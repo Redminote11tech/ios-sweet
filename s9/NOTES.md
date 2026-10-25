@@ -4,6 +4,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **PHASE 3 GATE PASSED (observed, photo 09:51 local): XNU runs on the S9 and prints to the screen.** First boot of `xnu-Image` (xnu run `40177226600`): `SWEET GIC: GICv2 (memory-mapped CPU interface)`, `cpu 0 GICv2 mask 0x1 timer INTID 27`, `Darwin Kernel Version 22.6.0 ... xnu-8796.141.3`, pmap/VM/zones, scheduler, IOKit, `Boot version: s9-shim`, AMFI, platform expert, AppleKeyStore, IOWatchdog, IOCoreSurfaceRoot, HID buttons + touch registered (stubs only, Qualcomm drivers off), `SWEET BATTERY static fallback`, `SWEET FB: AppleCLCD 1440x2960 stride 5760 at 0xcc000000`. Console wrapped to the top; `pe_arm_init_debug: failed to find cpu-debug-interface` (harmless). Timer interrupts evidently work (scheduler + IOKit threads progress). No root device given, so the expected end is "waiting for root device"; not yet confirmed.
+
 - **Shim T0 passed (observed):** S-Boot jumps to byte 0 of the boot image kernel at EL1. Watchdogs off with `WTCON=0` at `0x10050000`/`0x10060000` (no reset in 12+ min). Display updates only after `0x1281` -> `0x16030070` (DECON HW trigger). Framebuffer `0xCC000000` XRGB8888 stride 5760 confirmed.
 - **Shim T2 passed (observed):** EL1, Cortex-A55 r0p1, TGran16 supported, PA 40 bit, ISAR1 no PAC, PFR0 `0x10112222` (GIC field 0: no ICC_* sysregs), CNTFRQ 0, FDT at `0x8a000000`, load address varies per boot, 4 memory banks (4015 MiB), 2 GiB bank at `0x880000000` read/write OK (sparse 2048/2048, dense 16 MiB).
 - **Kernel patches 0082 (GICv2) and 0083 (boot_args framebuffer)** pushed; first CI build `40177226600` (workflow_dispatch: pushes from this session did not start a run).
