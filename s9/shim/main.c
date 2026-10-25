@@ -2093,6 +2093,68 @@ static void gpu_test(void)
 }
 #endif
 
+
+// ---------------------------------------------------------------- SMP probe (t8)
+// cpus=4 under XNU: PSCI CPU_ON returned 0 but cpu 1 never ran. Is it the
+// entry address above 4 GiB (XNU runs at 0x8_8000_0000)? Start cpu 1 at the
+// shim's own (low) smp_entry and cpu 2 at a copy in the high bank; each
+// writes a marker to the mailbox at 0xef300000.
+#ifdef SMPTEST
+extern char smp_entry[], smp_entry_end[];
+#define SMP_MBOX 0xef300000UL
+#define SMP_HIGH 0x880100000UL
+
+static u64 psci(u64 fn, u64 a1, u64 a2, u64 a3)
+{
+    register u64 x0 __asm__("x0") = fn;
+    register u64 x1 __asm__("x1") = a1;
+    register u64 x2 __asm__("x2") = a2;
+    register u64 x3 __asm__("x3") = a3;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+                     "x14", "x15", "x16", "x17", "memory");
+    return x0;
+}
+
+static void smp_try(u32 slot, u64 mpidr, u64 entry)
+{
+    wr32(SMP_MBOX + slot * 8, 0);
+    wr32(SMP_MBOX + slot * 8 + 4, 0);
+    __asm__ volatile("dsb sy" ::: "memory");
+    u64 rc = psci(0xC4000003UL, mpidr, entry, slot);
+    u64 t0 = now();
+    while (!rd32(SMP_MBOX + slot * 8) && now() - t0 < TB_HZ / 2)
+        ;
+    u32 m = rd32(SMP_MBOX + slot * 8);
+    kvh("  rc ", (u32)rc, "  mailbox ", m);
+    color(m >> 16 == 0x5ec0 ? OK : BAD);
+    puts_(m >> 16 == 0x5ec0 ? "  CORE RAN\n" : "  core did not run\n");
+    color(FG);
+}
+
+static void smp_test(void)
+{
+    color(HEAD);
+    puts_("SMP probe (t8)\n");
+    kvh("  PSCI_VERSION ", (u32)psci(0x84000000UL, 0, 0, 0), "", 0);
+    kvh("  AFFINITY_INFO cpu1 ", (u32)psci(0xC4000004UL, 1, 0, 0), "", 0);
+    color(HEAD);
+    puts_("cpu 1, entry below 4 GiB\n");
+    kvh("  entry ", (u64)smp_entry, "", 0);
+    smp_try(1, 1, (u64)smp_entry);
+    // copy the trampoline to the high bank (MMU off: no cache maintenance)
+    u32 n = (u32)(smp_entry_end - smp_entry);
+    for (u32 i = 0; i < n; i += 4)
+        wr32(SMP_HIGH + i, rd32((u64)smp_entry + i));
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+    color(HEAD);
+    puts_("cpu 2, entry above 4 GiB\n");
+    kvh("  entry ", SMP_HIGH, "  bytes ", n);
+    smp_try(2, 2, SMP_HIGH);
+    kvh("  AFFINITY_INFO cpu1 ", (u32)psci(0xC4000004UL, 1, 0, 0), "  cpu2 ", (u32)psci(0xC4000004UL, 2, 0, 0));
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -2114,6 +2176,14 @@ void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 {
     rect(0, 0, FB_W, FB_H, BG);
+#ifdef SMPTEST
+    smp_test();
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+    for (;;)
+        __asm__ volatile("wfe");
+#endif
 #ifdef GPUTEST
     gpu_test();
     color(HEAD);

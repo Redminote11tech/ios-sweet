@@ -49,6 +49,10 @@ link t6-Image out/nopayload.o
 # t7: Mali-G72 power-up and ID probe
 clang $CFLAGS -DGPUTEST -c main.c -o out/main.o
 link t7-Image out/nopayload.o
+
+# t8: PSCI CPU_ON probe (low vs high entry address)
+clang $CFLAGS -DSMPTEST -c main.c -o out/main.o
+link t8-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

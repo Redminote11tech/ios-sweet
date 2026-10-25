@@ -159,6 +159,30 @@ safe_fail:
         movk    w0, #0xdead, lsl #16
         ret
 
+// SMP probe (t8): PSCI CPU_ON target. x0 = context id (slot). Stores
+// 0x5EC0_0000 | CurrentEL << 8 | (MPIDR & 0xff..) in mailbox[x0], then parks.
+// Position independent and self-contained (the copy to high RAM takes
+// smp_entry .. smp_entry_end, literal included).
+        .balign 8
+        .globl smp_entry, smp_entry_end
+smp_entry:
+        mrs     x1, mpidr_el1
+        and     x1, x1, #0xffff
+        mrs     x2, CurrentEL
+        orr     x1, x1, x2, lsl #14
+        movz    w3, #0x5ec0, lsl #16
+        orr     x1, x1, x3
+        ldr     x2, smp_mbox
+        str     x1, [x2, x0, lsl #3]
+        dsb     sy
+        sev
+1:      wfe
+        b       1b
+        .balign 8
+smp_mbox:
+        .quad   0xef300000
+smp_entry_end:
+
 irq_common:
         sub     sp, sp, #(24 * 8)
         stp     x0, x1, [sp, #0]
