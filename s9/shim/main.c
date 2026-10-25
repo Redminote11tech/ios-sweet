@@ -1,0 +1,632 @@
+// S9 shim: XNU loader for the Galaxy S9 (SM-G960F, Exynos 9810).
+//
+// If an XNU payload (tools/mkpayload.py, magic "SWEETXNU") is linked into the
+// image, load it into the 2 GiB bank at 0x880000000 and jump to it, acting as
+// iBoot. Without a payload: test T2+T3, a text console with the facts the XNU
+// port needs.
+//
+// Prints: load address and entry registers, exception level and MMU/cache state, CPU ID
+// and feature registers (16K page support), the device tree's memory banks / initrd /
+// framebuffer bootarg, then probes the 2 GiB bank at 0x880000000. Afterwards a large
+// seconds counter runs in the lower half of the screen.
+//
+// Runs with the MMU off, so every access is Device memory: no unaligned accesses
+// (built with -mstrict-align) and no pointer-containing initialised data (built
+// position-independent with -mcmodel=tiny).
+
+#include <stdint.h>
+#include "font.h"
+
+typedef uint64_t u64;
+typedef uint32_t u32;
+typedef uint8_t u8;
+
+// ---------------------------------------------------------------- framebuffer
+#ifdef HOST    // host-side preview build (see test_host.c); not used on the phone
+extern u32 host_fb[];
+#define FB      ((volatile u32 *)host_fb)
+#else
+#define FB      ((volatile u32 *)0xCC000000UL)
+#endif
+#define FB_W    1440
+#define FB_H    2960
+#define STRIDE  1440            // in pixels (5760 bytes), confirmed by T0
+#define SCALE   2               // 16x32 font drawn at 32x64
+#define CW      (FONT_W * SCALE)
+#define CH      (FONT_H * SCALE)
+#define COLS    (FB_W / CW)     // 45
+
+#define BG      0xFF101828
+#define FG      0xFFE8E8E8
+#define DIM     0xFF8890A0
+#define OK      0xFF40E060
+#define BAD     0xFFFF5050
+#define HEAD    0xFF60B0FF
+#define WARN    0xFFFFD040
+
+static int cur_x, cur_y = 1;
+static u32 cur_fg = FG;
+
+static void rect(int x, int y, int w, int h, u32 c)
+{
+    for (int j = 0; j < h; j++) {
+        volatile u32 *p = FB + (u64)(y + j) * STRIDE + x;
+        for (int i = 0; i < w; i++)
+            p[i] = c;
+    }
+}
+
+static void glyph(int col, int row, char ch, u32 fg, u32 bg)
+{
+    if (ch < 32 || ch > 126)
+        ch = '?';
+    const unsigned short *g = font[ch - 32];
+    int x0 = col * CW + 24, y0 = row * CH;      // 24 px margin for the rounded corners
+    for (int y = 0; y < FONT_H; y++) {
+        unsigned short bits = g[y];
+        for (int s = 0; s < SCALE; s++) {
+            volatile u32 *p = FB + (u64)(y0 + y * SCALE + s) * STRIDE + x0;
+            for (int x = 0; x < FONT_W; x++) {
+                u32 c = (bits & (0x8000 >> x)) ? fg : bg;
+                for (int t = 0; t < SCALE; t++)
+                    *p++ = c;
+            }
+        }
+    }
+}
+
+static void putch(char c)
+{
+    if (c == '\n' || cur_x >= COLS - 1) {
+        cur_x = 0;
+        cur_y++;
+        if (c == '\n')
+            return;
+    }
+    glyph(cur_x++, cur_y, c, cur_fg, BG);
+}
+
+static void puts_(const char *s)
+{
+    while (*s)
+        putch(*s++);
+}
+
+static void color(u32 c) { cur_fg = c; }
+
+static void hex(u64 v, int digits)
+{
+    for (int i = digits - 1; i >= 0; i--)
+        putch("0123456789abcdef"[(v >> (i * 4)) & 0xf]);
+}
+
+static void hexv(u64 v)                 // shortest form, at least 1 digit
+{
+    int d = 1;
+    while (d < 16 && (v >> (d * 4)))
+        d++;
+    puts_("0x");
+    hex(v, d);
+}
+
+static void dec(u64 v)
+{
+    char b[21];
+    int i = 0;
+    do {
+        b[i++] = '0' + v % 10;
+        v /= 10;
+    } while (v);
+    while (i)
+        putch(b[--i]);
+}
+
+static void kv(const char *k, u64 v)
+{
+    color(DIM);
+    puts_(k);
+    color(FG);
+    hexv(v);
+    putch('\n');
+}
+
+#ifdef HOST
+u64 host_sysreg(const char *name);
+#define SYSREG(name) host_sysreg(#name)
+#else
+#define SYSREG(name) ({ u64 _v; __asm__ volatile("mrs %0, " #name : "=r"(_v)); _v; })
+#endif
+
+// ---------------------------------------------------------------- device tree
+static u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
+
+static int streq(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+static int prefix(const char *s, const char *p)
+{
+    while (*p)
+        if (*s++ != *p++)
+            return 0;
+    return 1;
+}
+
+static u64 cells(const u8 *p, int n)
+{
+    u64 v = 0;
+    for (int i = 0; i < n; i++)
+        v = v << 32 | be32(p + 4 * i);
+    return v;
+}
+
+static void show_fdt(const u8 *fdt)
+{
+    color(HEAD);
+    puts_("Device tree\n");
+    if (be32(fdt) != 0xd00dfeed) {
+        color(BAD);
+        puts_("  bad magic: ");
+        hexv(be32(fdt));
+        puts_("\n");
+        return;
+    }
+    u32 size = be32(fdt + 4), off_struct = be32(fdt + 8), off_str = be32(fdt + 12);
+    kv("  size        ", size);
+
+    const u8 *p = fdt + off_struct;
+    const char *strs = (const char *)fdt + off_str;
+    int depth = 0, acells = 2, scells = 1, in_mem = 0, in_chosen = 0, banks = 0;
+    u64 total = 0;
+
+    for (;;) {
+        u32 tok = be32(p);
+        p += 4;
+        if (tok == 1) {                                 // BEGIN_NODE
+            const char *name = (const char *)p;
+            depth++;
+            in_mem = depth == 2 && prefix(name, "memory");
+            in_chosen = depth == 2 && streq(name, "chosen");
+            int n = 0;
+            while (name[n])
+                n++;
+            p += (n + 4) & ~3;
+        } else if (tok == 2) {                          // END_NODE
+            depth--;
+            in_mem = in_chosen = 0;
+        } else if (tok == 3) {                          // PROP
+            u32 len = be32(p), nameoff = be32(p + 4);
+            const u8 *val = p + 8;
+            const char *pn = strs + nameoff;
+            if (depth == 1 && streq(pn, "#address-cells"))
+                acells = be32(val);
+            if (depth == 1 && streq(pn, "#size-cells"))
+                scells = be32(val);
+            if (in_mem && streq(pn, "reg")) {
+                for (u32 o = 0; o + 4 * (acells + scells) <= len; o += 4 * (acells + scells)) {
+                    u64 base = cells(val + o, acells), sz = cells(val + o + 4 * acells, scells);
+                    color(DIM);
+                    puts_("  mem ");
+                    color(FG);
+                    hex(base, 9);
+                    puts_(" + ");
+                    hex(sz, 8);
+                    color(DIM);
+                    puts_("  ");
+                    dec(sz >> 20);
+                    puts_(" MiB\n");
+                    total += sz;
+                    banks++;
+                }
+            }
+            if (in_chosen && (streq(pn, "linux,initrd-start") || streq(pn, "linux,initrd-end"))) {
+                color(DIM);
+                puts_(pn[13] == 's' ? "  initrd start " : "  initrd end   ");
+                color(FG);
+                hexv(cells(val, len / 4));
+                putch('\n');
+            }
+            if (in_chosen && streq(pn, "bootargs")) {
+                kv("  bootargs len ", len);
+                for (u32 i = 0; i + 19 < len; i++)
+                    if (prefix((const char *)val + i, "s3cfb.bootloaderfb=")) {
+                        color(DIM);
+                        puts_("  ");
+                        color(FG);
+                        for (u32 j = i; j < len && val[j] && val[j] != ' '; j++)
+                            putch(val[j]);
+                        putch('\n');
+                    }
+            }
+            p += 8 + ((len + 3) & ~3);
+        } else if (tok == 4) {                          // NOP
+        } else {
+            break;                                      // END or garbage
+        }
+    }
+    color(DIM);
+    puts_("  ");
+    dec(banks);
+    puts_(" banks, ");
+    dec(total >> 20);
+    puts_(" MiB total\n");
+}
+
+// ---------------------------------------------------------------- memory probe
+#define BANK      0x880000000UL
+#define BANK_SIZE 0x80000000UL
+
+static void probe_bank(void)
+{
+    color(HEAD);
+    puts_("Probe 2 GiB bank at 0x880000000\n");
+    color(DIM);
+    puts_("  sparse: 1 word per MiB ... ");
+
+#ifdef HOST
+    color(OK);
+    puts_("2048/2048 OK\n");
+    color(DIM);
+    puts_("  dense: first 16 MiB ... ");
+    color(OK);
+    puts_("OK\n");
+    return;
+#endif
+    // pass 1: write a pattern derived from the address
+    for (u64 a = BANK; a < BANK + BANK_SIZE; a += 1 << 20)
+        *(volatile u64 *)a = a ^ 0x5a5aa5a5c3c33c3cUL;
+    // pass 2: read it all back
+    u64 bad = 0, first_bad = 0;
+    for (u64 a = BANK; a < BANK + BANK_SIZE; a += 1 << 20)
+        if (*(volatile u64 *)a != (a ^ 0x5a5aa5a5c3c33c3cUL)) {
+            if (!bad)
+                first_bad = a;
+            bad++;
+        }
+    if (bad) {
+        color(BAD);
+        dec(bad);
+        puts_(" bad, first ");
+        hexv(first_bad);
+        putch('\n');
+    } else {
+        color(OK);
+        puts_("2048/2048 OK\n");
+    }
+
+    color(DIM);
+    puts_("  dense: first 16 MiB ... ");
+    bad = 0;
+    for (u64 a = BANK; a < BANK + (16 << 20); a += 8)
+        *(volatile u64 *)a = ~a;
+    for (u64 a = BANK; a < BANK + (16 << 20); a += 8)
+        if (*(volatile u64 *)a != ~a)
+            bad++;
+    if (bad) {
+        color(BAD);
+        dec(bad);
+        puts_(" bad words\n");
+    } else {
+        color(OK);
+        puts_("OK\n");
+    }
+}
+
+// ---------------------------------------------------------------- big counter
+static void big_digit(int x0, int y0, int d, int px, u32 on, u32 off)
+{
+    // draw the font glyph for '0'+d at px pixels per font pixel
+    const unsigned short *g = font['0' + d - 32];
+    for (int y = 0; y < FONT_H; y++)
+        for (int x = 0; x < FONT_W; x++)
+            rect(x0 + x * px, y0 + y * px, px, px, (g[y] & (0x8000 >> x)) ? on : off);
+}
+
+static void counter(int y0)
+{
+    u64 f = SYSREG(cntfrq_el0);
+    if (!f)
+        f = 26000000;
+    u64 t0 = SYSREG(cntpct_el0);
+    const int px = 12;                                  // digit = 192 x 384 px
+    for (u64 shown = ~0UL;;) {
+        u64 s = (SYSREG(cntpct_el0) - t0) / f;
+        if (s == shown)
+            continue;
+#ifdef HOST
+        if (shown != ~0UL)
+            return;
+#endif
+        shown = s;
+        int x = (FB_W - 4 * FONT_W * px) / 2;
+        u64 v = s % 10000;
+        for (int i = 3; i >= 0; i--) {
+            big_digit(x + i * FONT_W * px, y0, v % 10, px, OK, BG);
+            v /= 10;
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------- XNU loader
+// Payload layout: see tools/mkpayload.py (shared with the Redmi shim).
+#define BOOT_LINE_LENGTH 608
+#define PAGE_16K 0x4000UL
+
+struct payload_seg {
+    u64 vmaddr, vmsize, file_off, file_size;
+};
+
+struct payload {
+    char magic[8];
+    u32 version, nsegs;
+    u64 virt_base, entry_va, adt_off, adt_size, kernel_end;
+    u64 phys_base, mem_size;
+    char cmdline[BOOT_LINE_LENGTH];
+    struct payload_seg segs[];
+};
+
+struct boot_video {
+    u64 v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth;
+};
+
+struct boot_args {
+    uint16_t Revision, Version;
+    u64 virtBase, physBase, memSize, topOfKernelData;
+    struct boot_video Video;
+    u32 machineType;
+    u64 deviceTreeP;
+    u32 deviceTreeLength;
+    char CommandLine[BOOT_LINE_LENGTH];
+    u64 bootFlags, memSizeActual;
+};
+
+_Static_assert(__builtin_offsetof(struct payload, segs) == 0x2a8, "payload header layout");
+_Static_assert(__builtin_offsetof(struct boot_args, Video) == 40, "boot_args layout");
+_Static_assert(__builtin_offsetof(struct boot_args, CommandLine) == 108, "boot_args layout");
+_Static_assert(sizeof(struct boot_args) == 736, "boot_args layout");
+
+#ifndef HOST
+extern const u8 payload_start[];   // s9/shim/payload.S (empty without a payload)
+#else
+extern const u8 *host_payload;      // test_host.c
+#define payload_start host_payload
+#endif
+
+// MMU off: every access is Device memory, so copy in aligned 8-byte words.
+static void copy64(u64 dst, u64 src, u64 n)
+{
+    volatile u64 *d = (volatile u64 *)dst;
+    volatile const u64 *s = (volatile const u64 *)src;
+    for (u64 i = 0; i < (n + 7) / 8; i++)
+        d[i] = s[i];
+}
+
+static void zero64(u64 dst, u64 n)
+{
+    volatile u64 *d = (volatile u64 *)dst;
+    for (u64 i = 0; i < n / 8; i++)
+        d[i] = 0;
+}
+
+// S-Boot leaves SCTLR_EL1.C set with the MMU off. Clean+invalidate the
+// destination range by address (to the point of coherency) before copying, so
+// no stale or dirty S-Boot line can shadow or be written back over what we
+// copy for XNU. By-address maintenance works on physical addresses with the
+// MMU off and, unlike set/way, is never trapped by a hypervisor.
+static void dcache_civac_range(u64 start, u64 end)
+{
+#ifndef HOST
+    u64 ctr = SYSREG(ctr_el0);
+    u64 line = 4UL << ((ctr >> 16) & 0xf);      // DminLine, in bytes
+    for (u64 a = start & ~(line - 1); a < end; a += line)
+        __asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+#else
+    (void)start;
+    (void)end;
+#endif
+}
+
+static int payload_ok(const struct payload *p)
+{
+    const char want[8] = { 'S', 'W', 'E', 'E', 'T', 'X', 'N', 'U' };
+    for (int i = 0; i < 8; i++)
+        if (p->magic[i] != want[i])
+            return 0;
+    return 1;
+}
+
+typedef void (*xnu_entry_t)(u64 boot_args_pa);
+
+// Returns only on failure (after printing why).
+static void boot_xnu(void)
+{
+    const struct payload *p = (const struct payload *)payload_start;
+    u64 src = (u64)payload_start;
+
+    color(HEAD);
+    puts_("XNU loader\n");
+    if (!payload_ok(p)) {
+        color(DIM);
+        puts_("  no payload linked in: diagnostics\n");
+        return;
+    }
+    if (p->version != 1 || (p->adt_off & 7) || (src & 7)) {
+        color(BAD);
+        puts_("  bad payload header\n");
+        return;
+    }
+    u64 pa_of_va = p->phys_base - p->virt_base;     // pa = va + this
+    kv("  payload     ", src);
+    kv("  phys base   ", p->phys_base);
+    kv("  mem size    ", p->mem_size);
+    kv("  entry va    ", p->entry_va);
+    kv("  segments    ", p->nsegs);
+
+    if (p->phys_base != BANK || p->mem_size > BANK_SIZE) {
+        color(BAD);
+        puts_("  kernel RAM is not the 2 GiB bank\n");
+        return;
+    }
+
+    // Everything we write: kernel segments, ADT, boot_args (one 16K page).
+    u64 end = p->kernel_end + pa_of_va + p->adt_size + 2 * PAGE_16K;
+    color(DIM);
+    puts_("  cache flush ... ");
+    dcache_civac_range(p->phys_base, end);
+    color(OK);
+    puts_("ok\n");
+
+    color(DIM);
+    puts_("  copy kernel ... ");
+    for (u32 i = 0; i < p->nsegs; i++) {
+        const struct payload_seg *sg = &p->segs[i];
+        u64 dst = sg->vmaddr + pa_of_va;
+        copy64(dst, src + sg->file_off, sg->file_size);
+        u64 done = (sg->file_size + 7) & ~7UL;
+        if (sg->vmsize > done)
+            zero64(dst + done, sg->vmsize - done);
+    }
+    color(OK);
+    puts_("ok\n");
+
+    // ADT, then boot_args, right behind the kernel (below topOfKernelData).
+    u64 adt_pa = p->kernel_end + pa_of_va;
+    copy64(adt_pa, src + p->adt_off, p->adt_size);
+    u64 ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
+    u64 top = ba_pa + PAGE_16K;
+
+    zero64(ba_pa, PAGE_16K);
+    volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
+    ba->Revision = 2;
+    ba->Version = 2;
+    ba->virtBase = p->virt_base;
+    ba->physBase = p->phys_base;
+    ba->memSize = p->mem_size;
+    ba->topOfKernelData = top;
+    ba->Video.v_baseAddr = 0xCC000000UL;
+    ba->Video.v_display = 1;
+    ba->Video.v_rowBytes = STRIDE * 4;
+    ba->Video.v_width = FB_W;
+    ba->Video.v_height = FB_H;
+    ba->Video.v_depth = 32;
+    ba->deviceTreeP = adt_pa - pa_of_va;            // XNU reads it with the MMU on: a VA
+    ba->deviceTreeLength = (u32)p->adt_size;
+    for (int i = 0; i < BOOT_LINE_LENGTH; i++)
+        ba->CommandLine[i] = p->cmdline[i];
+    ba->memSizeActual = p->mem_size;
+    kv("  boot_args   ", ba_pa);
+    kv("  ADT         ", adt_pa);
+
+    u64 entry_pa = p->entry_va + pa_of_va;
+    kv("  jump        ", entry_pa);
+    color(OK);
+    puts_("  jumping to XNU\n");
+#ifndef HOST
+    __asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+    ((xnu_entry_t)entry_pa)(ba_pa);
+#endif
+    color(BAD);
+    puts_("  XNU returned\n");
+}
+
+// ---------------------------------------------------------------- exceptions
+void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
+{
+    cur_fg = BAD;
+    puts_("\n*** EXCEPTION vector ");
+    dec(vec);
+    puts_(" ***\n");
+    kv("  ESR  ", esr);
+    kv("  ELR  ", elr);
+    kv("  FAR  ", far);
+    kv("  SPSR ", spsr);
+#ifndef HOST
+    for (;;)
+        __asm__ volatile("wfe");
+#endif
+}
+
+// ---------------------------------------------------------------- main
+void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
+{
+    rect(0, 0, FB_W, FB_H, BG);
+
+    color(HEAD);
+    puts_("S9 shim  -  Exynos 9810\n");
+
+    kv("  load addr   ", load);
+    kv("  x0 (fdt)    ", x0);
+    kv("  x1 x2 x3    ", x1 | x2 | x3);             // all three should be 0
+
+    u64 el = (SYSREG(CurrentEL) >> 2) & 3;
+    u64 sctlr = SYSREG(sctlr_el1);
+    color(DIM);
+    puts_("  EL ");
+    color(el == 1 ? OK : WARN);
+    dec(el);
+    color(DIM);
+    puts_("  MMU ");
+    color(FG);
+    puts_(sctlr & 1 ? "on" : "off");
+    color(DIM);
+    puts_("  D$ ");
+    color(FG);
+    puts_(sctlr & 4 ? "on" : "off");
+    color(DIM);
+    puts_("  I$ ");
+    color(FG);
+    puts_(sctlr & (1 << 12) ? "on\n" : "off\n");
+
+    color(HEAD);
+    puts_("CPU\n");
+    u64 midr = SYSREG(midr_el1);
+    kv("  MIDR        ", midr);
+    color(DIM);
+    puts_("  core        ");
+    color(FG);
+    puts_(((midr >> 4) & 0xfff) == 0xd05 ? "Cortex-A55\n" : "other (not A55)\n");
+
+    u64 mmfr0 = SYSREG(id_aa64mmfr0_el1);
+    kv("  MMFR0       ", mmfr0);
+    u64 tg16 = (mmfr0 >> 20) & 0xf, tg4 = (mmfr0 >> 28) & 0xf, pa = mmfr0 & 0xf;
+    color(DIM);
+    puts_("  16K pages   ");
+    color(tg16 ? OK : BAD);
+    puts_(tg16 ? "YES" : "NO");
+    color(DIM);
+    puts_("   4K ");
+    color(FG);
+    puts_(tg4 == 0 ? "yes" : "no");
+    color(DIM);
+    puts_("   PA ");
+    color(FG);
+    dec(pa == 0 ? 32 : pa == 1 ? 36 : pa == 2 ? 40 : pa == 3 ? 42 : pa == 4 ? 44 : 48);
+    puts_(" bit\n");
+
+    kv("  PFR0        ", SYSREG(id_aa64pfr0_el1));
+    kv("  ISAR0       ", SYSREG(id_aa64isar0_el1));
+    kv("  ISAR1       ", SYSREG(id_aa64isar1_el1));
+    kv("  CTR         ", SYSREG(ctr_el0));
+    kv("  CNTFRQ      ", SYSREG(cntfrq_el0));
+
+    // A linked-in XNU payload means: boot it. Returns only if it can't.
+    boot_xnu();
+
+    if (x0 && !(x0 & 7))
+        show_fdt((const u8 *)x0);
+    else {
+        color(BAD);
+        puts_("no valid FDT pointer in x0\n");
+    }
+
+    probe_bank();
+
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+}

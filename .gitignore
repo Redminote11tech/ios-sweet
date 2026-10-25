@@ -8,3 +8,11 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# S9 shim build outputs and device files
+s9/shim/out/
+s9/shim/*-Image
+s9/shim/*.img
+s9/shim/test.dtb
+s9/shim/*.ppm
+s9/shim/font-preview.png
