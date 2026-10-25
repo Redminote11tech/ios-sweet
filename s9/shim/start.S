@@ -166,30 +166,94 @@ safe_fail:
         .balign 8
         .globl smp_entry, smp_entry_end
 smp_entry:
-        // record = 0x5EC0_0000 | CurrentEL<<14 | MPIDR[15:0]; slot by MPIDR
-        // (aff0 + 4*aff1), not by x0, since PSCI 0.1 may not pass context.
-        mov     x9, x0
+        // Self-reporting secondary: writes a hello to its mailbox slot (by
+        // MPIDR: aff0 + 4*aff1), paints a bar on the framebuffer (green at
+        // EL1, yellow at EL2), optionally chain-starts the core named in the
+        // table at mbox+0x200, then counts forever with a moving white block.
+        // Position independent, MMU off, no stack.
         mrs     x1, mpidr_el1
         and     x1, x1, #0xffff
         and     x4, x1, #0xff
         lsr     x5, x1, #8
         and     x5, x5, #0xff
-        add     x4, x4, x5, lsl #2
+        add     x4, x4, x5, lsl #2          // slot
         mrs     x2, CurrentEL
         orr     x1, x1, x2, lsl #14
         movz    w3, #0x5ec0, lsl #16
         orr     x1, x1, x3
-        ldr     x2, smp_mbox
-        add     x2, x2, x4, lsl #4
-        str     x9, [x2, #8]
-        str     x1, [x2]
+        ldr     x6, smp_mbox
+        add     x6, x6, x4, lsl #4          // our 16-byte slot
+        str     x1, [x6]
         dsb     sy
-        sev
-1:      wfe
-        b       1b
+        // bar: rows 2300 + slot*80, 40 rows, full width (below the text)
+        ldr     x7, smp_fb
+        mov     x8, #5760
+        mov     x9, #2300
+        add     x9, x9, x4, lsl #6
+        add     x9, x9, x4, lsl #4          // slot*80
+        mul     x9, x9, x8
+        add     x7, x7, x9
+        mov     x17, x7                     // keep the bar origin
+        movz    w10, #0xff00                // green: EL1
+        cmp     x2, #4
+        b.eq    1f
+        movk    w10, #0x00ff, lsl #16       // yellow: anything else
+1:      mov     x11, #40
+2:      mov     x12, #1440
+        mov     x13, x7
+3:      str     w10, [x13], #4
+        subs    x12, x12, #1
+        b.ne    3b
+        add     x7, x7, x8
+        subs    x11, x11, #1
+        b.ne    2b
+        dsb     sy
+        // chain-start the next core if the table says so
+        ldr     x2, smp_mbox
+        add     x14, x2, #0x200
+        ldr     w1, [x14, x4, lsl #2]
+        cbz     w1, 9f
+        movz    w15, #0xca11
+        str     w15, [x6, #4]
+        dsb     sy
+        movz    x0, #0x0003
+        movk    x0, #0xc400, lsl #16
+        adr     x2, smp_entry
+        mov     x3, #0
+        smc     #0
+        str     w0, [x6, #8]
+        movz    w15, #0xd0e
+        str     w15, [x6, #4]
+        dsb     sy
+        // alive loop: counter in word 3, white block walking along the bar
+9:      mov     x15, #0
+10:     add     x15, x15, #1
+        str     w15, [x6, #12]
+        and     x12, x15, #0x3f             // 64 positions x 20 px
+        mov     x13, #20
+        mul     x12, x12, x13
+        add     x13, x17, x12, lsl #2
+        mov     x11, #8
+11:     mov     x12, #16
+        mov     x14, x13
+        movz    w10, #0xffff
+        movk    w10, #0x00ff, lsl #16
+12:     str     w10, [x14], #4
+        subs    x12, x12, #1
+        b.ne    12b
+        add     x13, x13, x8
+        subs    x11, x11, #1
+        b.ne    11b
+        dsb     sy
+        mov     x16, #0x400000
+13:     subs    x16, x16, #1
+        b.ne    13b
+        b       10b
         .balign 8
 smp_mbox:
         .quad   0xef300000
+smp_fb:
+        .quad   0xcc000000
 smp_entry_end:
 
 irq_common:

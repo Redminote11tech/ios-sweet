@@ -2160,43 +2160,51 @@ static void smp_try(u64 mpidr, u64 entry, u32 ctx, int pmuseq, int sgi)
     color(FG);
 }
 
-static void big_try(u64 mpidr)
+static void slot_line(int slot)
 {
-    u32 slot = (mpidr & 0xff) + ((mpidr >> 8) & 0xff) * 4;
     u64 mb = SMP_MBOX + slot * 16;
-    color(HEAD);
-    kvh("CPU_ON ", (u32)mpidr, "  status ", safe_rd32(PMU + core_status_off(mpidr)));
-    color(FG);
-    puts_("  calling firmware...\n");
-    u64 t0 = now();
-    u64 rc = psci(0xC4000003UL, mpidr, (u64)smp_entry, 0);
-    u64 t1 = now();
-    kvh("  returned rc ", (u32)rc, "  ms ", (u32)((t1 - t0) / (TB_HZ / 1000)));
-    while (!rd32(mb) && now() - t1 < 2 * TB_HZ)
-        ;
-    u32 m = rd32(mb);
-    kvh("  mbox ", m, "  status ", safe_rd32(PMU + core_status_off(mpidr)));
-    color(m >> 16 == 0x5ec0 ? OK : BAD);
-    puts_(m >> 16 == 0x5ec0 ? "  CORE RAN\n" : "  core did not run\n");
-    color(FG);
+    kvh(slot < 4 ? "  little " : "  big ", slot & 3, "  hello ", rd32(mb));
+    kvh("    chain ", rd32(mb + 4), "  rc ", rd32(mb + 8));
+    kvh("    count ", rd32(mb + 12), "  status ",
+        safe_rd32(PMU + core_status_off(slot < 4 ? slot : 0x100 + (slot & 3))));
 }
 
 static void smp_test(void)
 {
     color(HEAD);
-    puts_("SMP probe 4 (t8): big cores\n");
-    kvh("  slot4 left from last run ", rd32(SMP_MBOX + 4 * 16), "", 0);
-    for (int i = 0; i < 8 * 16; i += 4)
+    puts_("SMP probe 5 (t8): self-reporting cores\n");
+    kvh("  GICD_ITARGETSR0 ", safe_rd32(GICD + 0x800), "  GICD_CTLR ", safe_rd32(GICD));
+    for (int i = 0; i < 0x400; i += 4)
         wr32(SMP_MBOX + i, 0);
+    // chain table: little 1 -> 2 -> 3, big 0x100 -> 0x101 -> 0x102 -> 0x103
+    wr32(SMP_MBOX + 0x200 + 1 * 4, 2);
+    wr32(SMP_MBOX + 0x200 + 2 * 4, 3);
+    wr32(SMP_MBOX + 0x200 + 4 * 4, 0x101);
+    wr32(SMP_MBOX + 0x200 + 5 * 4, 0x102);
+    wr32(SMP_MBOX + 0x200 + 6 * 4, 0x103);
     __asm__ volatile("dsb sy" ::: "memory");
-    big_try(0x100);
-    big_try(0x101);
-    big_try(0x102);
-    big_try(0x103);
     color(HEAD);
-    puts_("all mailbox slots:\n");
-    for (int i = 0; i < 8; i += 2)
-        kvh("  ", rd32(SMP_MBOX + i * 16), "  ", rd32(SMP_MBOX + (i + 1) * 16));
+    puts_("cpu 1 (little) CPU_ON, then 2 s\n");
+    u64 rc = psci(0xC4000003UL, 1, (u64)smp_entry, 0);
+    wait_ticks(2 * TB_HZ);
+    kvh("  rc ", (u32)rc, "  hello ", rd32(SMP_MBOX + 16));
+    color(HEAD);
+    puts_("cpu 0x100 (big) CPU_ON (froze in probe 2)\n");
+    color(FG);
+    puts_("  calling firmware...\n");
+    rc = psci(0xC4000003UL, 0x100, (u64)smp_entry, 0);
+    kvh("  returned rc ", (u32)rc, "", 0);
+    wait_ticks(2 * TB_HZ);
+    int y = cur_y;
+    for (;;) {
+        cur_y = y;
+        cur_x = 0;
+        color(HEAD);
+        puts_("slots (refreshes every second):\n");
+        for (int i = 0; i < 8; i++)
+            slot_line(i);
+        wait_ticks(TB_HZ);
+    }
 }
 #endif
 
@@ -2223,11 +2231,6 @@ void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
     rect(0, 0, FB_W, FB_H, BG);
 #ifdef SMPTEST
     smp_test();
-    color(HEAD);
-    puts_("\nDone. Seconds since start:\n");
-    counter((cur_y + 1) * CH + 40);
-    for (;;)
-        __asm__ volatile("wfe");
 #endif
 #ifdef GPUTEST
     gpu_test();
