@@ -1157,6 +1157,200 @@ static void __attribute__((unused)) ufs_probe(void)
 }
 #endif
 
+
+// ---------------------------------------------------------------- input probe (t6)
+// Buttons and touchscreen of the S9, from the stock device tree:
+//   keys    pinctrl 0x14050000 (alive): vol+ gpa0-3, vol- gpa0-4, bixby gpa0-6,
+//           power gpa2-4 (gpio-keys, active low)
+//   touch   S6SY761 ("sec,sec_ts") at I2C 0x48 on hsi2c10 0x104B0000 (USI v2),
+//           SCL/SDA gpp1-4/5 (pinctrl 0x10430000, function 2), attn gpa1-0
+// Read-only except: I2C pins to their I2C function, the HSI2C block's own
+// registers, and an I2C read of the touch chip's device ID (command 0x52).
+#ifdef INPUTTEST
+#define PIN_ALIVE  0x14050000UL
+#define PIN_PERIC0 0x10430000UL
+#define HSI2C10    0x104B0000UL
+#define USI_SWCONF 0x10411000UL
+
+static u32 bank_dat(u64 base, u32 bank) { return rd32(base + bank * 0x20 + 4); }
+
+static void i2c_dump(void)
+{
+    static const u32 r[] = { 0x00, 0x04, 0x20, 0x24, 0x30, 0x40, 0x44, 0x50, 0x60, 0x64, 0x68, 0x6c, 0x70, 0xc0, 0xc4, 0xc8, 0xcc };
+    for (u32 i = 0; i < sizeof(r) / sizeof(r[0]); i += 2) {
+        color(DIM);
+        puts_("  +");
+        hex(r[i], 2);
+        puts_(" ");
+        color(FG);
+        hexv(rd32(HSI2C10 + r[i]));
+        if (i + 1 < sizeof(r) / sizeof(r[0])) {
+            color(DIM);
+            puts_("  +");
+            hex(r[i + 1], 2);
+            puts_(" ");
+            color(FG);
+            hexv(rd32(HSI2C10 + r[i + 1]));
+        }
+        putch('\n');
+    }
+}
+
+// HSI2C (Linux i2c-exynos5.c, exynos7 variant) in auto mode, polled.
+#define HS_CTL 0x00
+#define HS_FIFO_CTL 0x04
+#define HS_INT_EN 0x20
+#define HS_INT_STAT 0x24
+#define HS_FIFO_STAT 0x30
+#define HS_TX 0x34
+#define HS_RX 0x38
+#define HS_CONF 0x40
+#define HS_AUTO_CONF 0x44
+#define HS_TIMEOUT 0x48
+#define HS_TRANS_STAT 0x50
+#define HS_FS1 0x60
+#define HS_FS2 0x64
+#define HS_FS3 0x68
+#define HS_SLA 0x6c
+#define HS_ADDR 0x70
+
+static void hs_init(void)
+{
+    u32 ctl = rd32(HSI2C10 + HS_CTL);
+    wr32(HSI2C10 + HS_CTL, ctl | (1u << 31));           // SW_RST
+    wait_ticks(TB_HZ / 10000);
+    wr32(HSI2C10 + HS_CTL, ctl & ~(1u << 31));
+    // 100 kHz from a 200 MHz ipclk (default-clk in the device tree)
+    u32 ftl = (rd32(HSI2C10 + HS_CONF) >> 16) & 7;
+    u32 temp = 200000000u / 100000u - 8 - ftl, div = 0;
+    while (temp / (div + 1) > 510)
+        div++;
+    u32 cyc = temp / (div + 1) - 2, l = cyc / 2;
+    if (l > 255)
+        l = 255;
+    wr32(HSI2C10 + HS_FS1, l << 24 | l << 16 | l << 8);
+    wr32(HSI2C10 + HS_FS2, (l / 2) << 24 | l << 8 | l);
+    wr32(HSI2C10 + HS_FS3, div << 16 | cyc);
+    wr32(HSI2C10 + HS_SLA, l / 2);
+    wr32(HSI2C10 + HS_CONF, 1u << 31);                    // AUTO_MODE
+    wr32(HSI2C10 + HS_CTL, 1u << 0 | 1u << 3);            // I2C function, master
+    wr32(HSI2C10 + HS_FIFO_CTL, 1u << 0 | 1u << 1 | 1u << 4 | 1u << 16);   // RX/TX FIFO on
+    wr32(HSI2C10 + HS_TIMEOUT, 1u << 31 | 0xff);
+    wr32(HSI2C10 + HS_INT_EN, 0xff80);                    // done/abort/no ack/no dev/timeout
+    wr32(HSI2C10 + HS_ADDR, 0x48u << 10);
+}
+
+// One auto-mode message to address 0x48 with STOP. 0 = done; else status bits.
+static u32 hs_xfer(int read, u8 *buf, u32 len)
+{
+    wr32(HSI2C10 + HS_INT_STAT, rd32(HSI2C10 + HS_INT_STAT));
+    u32 ctl = rd32(HSI2C10 + HS_CTL) & ~(3u << 6);
+    wr32(HSI2C10 + HS_CTL, ctl | (read ? 1u << 6 : 1u << 7));   // RXCHON / TXCHON
+    u32 auto_conf = len | 1u << 17 | (read ? 1u << 16 : 0);     // STOP_AFTER_TRANS, READ
+    wr32(HSI2C10 + HS_AUTO_CONF, auto_conf);
+    if (!read)
+        for (u32 i = 0; i < len; i++)
+            wr32(HSI2C10 + HS_TX, buf[i]);
+    wr32(HSI2C10 + HS_AUTO_CONF, auto_conf | 1u << 31);         // MASTER_RUN
+    u64 t0 = now();
+    u32 got = 0, st = 0;
+    while (now() - t0 < TB_HZ / 5) {                             // 200 ms
+        if (read)
+            while (got < len && !(rd32(HSI2C10 + HS_FIFO_STAT) & (1u << 24)))
+                buf[got++] = (u8)rd32(HSI2C10 + HS_RX);
+        st = rd32(HSI2C10 + HS_INT_STAT);
+        if (st & 0xff80)
+            break;
+    }
+    if (read)
+        while (got < len && !(rd32(HSI2C10 + HS_FIFO_STAT) & (1u << 24)))
+            buf[got++] = (u8)rd32(HSI2C10 + HS_RX);
+    kvh("    int ", st, "  trans ", rd32(HSI2C10 + HS_TRANS_STAT));
+    if (read && got < len)
+        return 0x80000000 | got;
+    return (st & 0x7f00) ? st : (st & 0x80 ? 0 : 0x40000000 | st);
+}
+
+static void input_test(void)
+{
+    color(HEAD);
+    puts_("Input probe (t6)\n");
+    kvh("  gpa0 con ", rd32(PIN_ALIVE + 0x00), "  dat ", bank_dat(PIN_ALIVE, 0));
+    kvh("  gpa1 con ", rd32(PIN_ALIVE + 0x20), "  dat ", bank_dat(PIN_ALIVE, 1));
+    kvh("  gpa2 con ", rd32(PIN_ALIVE + 0x40), "  dat ", bank_dat(PIN_ALIVE, 2));
+    kvh("  gpp1 con ", rd32(PIN_PERIC0 + 0x20), "  dat ", bank_dat(PIN_PERIC0, 1));
+    color(DIM);
+    puts_("  USI sw_conf 0x10411004..30:\n  ");
+    color(FG);
+    for (u32 o = 0x04; o <= 0x30; o += 4) {
+        hex(rd32(USI_SWCONF + o), 1);
+        putch(' ');
+    }
+    putch('\n');
+    color(HEAD);
+    puts_("hsi2c10 0x104B0000\n");
+    i2c_dump();
+
+    // Buttons and the touch attention line, live for 20 s: press each button
+    // and touch the screen; counters show every change seen.
+    color(HEAD);
+    puts_("Press vol+ vol- bixby power, touch the screen (20 s)\n");
+    int row = cur_y;
+    u32 cnt[5] = { 0 }, last[5], v[5];
+    const char *name[5] = { "vol+ ", "vol- ", "bixby ", "power ", "t-irq " };
+    for (int k = 0; k < 2; k++) {
+        u32 a0 = bank_dat(PIN_ALIVE, 0), a1 = bank_dat(PIN_ALIVE, 1), a2 = bank_dat(PIN_ALIVE, 2);
+        v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
+        v[3] = (a2 >> 4) & 1; v[4] = a1 & 1;
+        for (int i = 0; i < 5; i++)
+            last[i] = v[i];
+    }
+    u64 end = now() + 20 * TB_HZ;
+    while (now() < end) {
+        u32 a0 = bank_dat(PIN_ALIVE, 0), a1 = bank_dat(PIN_ALIVE, 1), a2 = bank_dat(PIN_ALIVE, 2);
+        v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
+        v[3] = (a2 >> 4) & 1; v[4] = a1 & 1;
+        cur_y = row;
+        cur_x = 0;
+        for (int i = 0; i < 5; i++) {
+            if (v[i] != last[i]) {
+                cnt[i]++;
+                last[i] = v[i];
+            }
+            color(v[i] ? DIM : OK);
+            puts_(name[i]);
+            color(FG);
+            dec(v[i]);
+            putch('/');
+            dec(cnt[i]);
+            puts_("  ");
+        }
+        wait_ticks(TB_HZ / 50);
+    }
+    cur_y = row + 1;
+    cur_x = 0;
+    putch('\n');
+
+    // Touch chip: I2C pins to their I2C function (gpp1-4/5 = 2), then
+    // write command 0x52 (device ID) and read 3 bytes.
+    color(HEAD);
+    puts_("Touch I2C (0x48, cmd 0x52)\n");
+    u32 con = rd32(PIN_PERIC0 + 0x20);
+    con = (con & ~(0xffu << 16)) | (0x22u << 16);
+    wr32(PIN_PERIC0 + 0x20, con);
+    kvh("  gpp1 con ", rd32(PIN_PERIC0 + 0x20), "  dat ", bank_dat(PIN_PERIC0, 1));
+    hs_init();
+    i2c_dump();
+    u8 cmd = 0x52, id[3] = { 0 };
+    u32 r1 = hs_xfer(0, &cmd, 1);
+    kvh("  write rc ", r1, "", 0);
+    u32 r2 = hs_xfer(1, id, 3);
+    kvh("  read rc ", r2, "  id ", (u32)id[0] << 16 | id[1] << 8 | id[2]);
+    color(!r1 && !r2 ? OK : BAD);
+    puts_(!r1 && !r2 ? "  TOUCH CHIP ANSWERS\n" : "  no answer\n");
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -1178,6 +1372,14 @@ void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 {
     rect(0, 0, FB_W, FB_H, BG);
+#ifdef INPUTTEST
+    input_test();
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+    for (;;)
+        __asm__ volatile("wfe");
+#endif
 
     color(HEAD);
     puts_("S9 shim  -  Exynos 9810\n");
