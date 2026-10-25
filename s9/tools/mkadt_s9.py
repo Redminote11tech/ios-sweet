@@ -95,6 +95,9 @@ def build(seed=None):
              cstr('qcom,kryo470') + cstr('ARM,v8')),
             ('reg', u32(mpidr)),
             ('psci-id', u32(psci_id)),
+            # free low RAM for the CPU_ON trampoline: the firmware only starts
+            # cores below 4 GiB, the kernel lives at 0x8_8000_0000 (NOTES).
+            ('psci-trampoline', u64(0xef3f0000)),
             ('cpu-id', u32(core)),
             ('cluster-id', u32(0)),
             ('cluster-type', u32(0)),

@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 4bf2bf8..6129009 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -19,6 +19,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ extern "C" void sweet_secondary_entry(void);
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ extern "C" void sweet_gic_send_sgi(unsigned int cpu, uint64_t mpidr, unsigned int id);
+ 
+@@ -246,6 +247,31 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 	if (psci != NULL && psci->getLength() == sizeof(uint32_t)) {
+ 		target = *(const uint32_t *)psci->getBytesNoCopy();
+ 	}
++	/*
++	 * Exynos 9810: the firmware only starts a core at an entry below 4 GiB
++	 * (the shim's SMP probe 8: same code at 0x88148e000 never runs, at
++	 * 0x800f8ff8 it does). The ADT names a free low page ('psci-trampoline');
++	 * put "ldr x16, #8; br x16; .quad entry" there, uncached, and start the
++	 * core on it.
++	 */
++	OSData *tramp = getProvider() ?
++	    OSDynamicCast(OSData, getProvider()->getProperty("psci-trampoline")) : NULL;
++	if (tramp != NULL && tramp->getLength() == sizeof(uint64_t)) {
++		uint64_t tpa = *(const uint64_t *)tramp->getBytesNoCopy() + 0x40 * getCPUNumber();
++		volatile uint32_t *t = (volatile uint32_t *)ml_io_map(trunc_page(tpa), PAGE_SIZE);
++		if (t == NULL) {
++			panic("SWEET CPU: cannot map PSCI trampoline 0x%llx", tpa);
++		}
++		t = (volatile uint32_t *)((uintptr_t)t + (tpa & PAGE_MASK));
++		t[0] = 0x58000050;              /* ldr x16, #8 */
++		t[1] = 0xd61f0200;              /* br  x16 */
++		t[2] = (uint32_t)entry;
++		t[3] = (uint32_t)((uint64_t)entry >> 32);
++		__builtin_arm_dsb(DSB_SY);
++		IOLog("SWEET CPU: cpu=%u trampoline 0x%llx -> 0x%llx\n",
++		    getCPUNumber(), tpa, (uint64_t)entry);
++		entry = (vm_offset_t)tpa;
++	}
+ 	IOLog("SWEET CPU: cpu=%u CPU_ON mpidr=0x%x target=0x%llx entry_pa=0x%llx context=%u\n",
+ 	    getCPUNumber(), cpu->phys_id, target, (uint64_t)entry, getCPUNumber());
+ 	__builtin_arm_dsb(DSB_SY);
