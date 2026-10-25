@@ -1183,7 +1183,7 @@ static u32 bank_dat(u64 base, u32 bank) { return rd32(base + bank * 0x20 + 4); }
 #define GPA1 2
 #define GPA2 3
 
-static void i2c_dump(void)
+static void __attribute__((unused)) i2c_dump(void)
 {
     static const u32 r[] = { 0x00, 0x04, 0x20, 0x24, 0x30, 0x40, 0x44, 0x50, 0x60, 0x64, 0x68, 0x6c, 0x70, 0xc0, 0xc4, 0xc8, 0xcc };
     for (u32 i = 0; i < sizeof(r) / sizeof(r[0]); i += 2) {
@@ -1250,7 +1250,7 @@ static void hs_init(void)
 }
 
 // One auto-mode message to address 0x48 with STOP. 0 = done; else status bits.
-static u32 hs_xfer(int read, u8 *buf, u32 len)
+static u32 __attribute__((unused)) hs_xfer(int read, u8 *buf, u32 len)
 {
     wr32(HSI2C10 + HS_INT_STAT, rd32(HSI2C10 + HS_INT_STAT));
     u32 ctl = rd32(HSI2C10 + HS_CTL) & ~(3u << 6);
@@ -1370,6 +1370,49 @@ static void touch_power(void)
     kvh("  write rc ", (u32)(w1 & 0xff) << 8 | (u32)(w2 & 0xff), "", 0);
     kvh("  gpp1 dat ", bank_dat(PIN_PERIC0, 1), "  gpa1 dat ", bank_dat(PIN_ALIVE, GPA1));
     wait_ticks(TB_HZ / 5);                                       // S6SY761 needs ~100 ms after power
+}
+
+
+// One auto-mode message to addr with STOP, completion from TRANS_STATUS
+// (Samsung i2c-exynos5.c for USI v2: bit0 TRANS_DONE, bit1 ABORT, bit2
+// NO_DEV_ACK, bit3 NO_DEV, bit4 TIMEOUT_AUTO, bit17 MASTER_BUSY).
+// Returns TRANS_STATUS; bytes read in *got.
+static u32 hs_msg(u32 addr, int read, u8 *buf, u32 len, u32 *got)
+{
+    u32 ctl = rd32(HSI2C10 + HS_CTL) & ~(3u << 6);
+    wr32(HSI2C10 + HS_FIFO_CTL, 1u | 2u | (len << 4) | (len << 16));
+    wr32(HSI2C10 + HS_ADDR, (7u << 24) | ((addr & 0x7f) << 10));
+    wr32(HSI2C10 + HS_CTL, ctl | (read ? 1u << 6 : 1u << 7));
+    wr32(HSI2C10 + HS_INT_EN, 1u << 7);
+    wr32(HSI2C10 + HS_INT_STAT, 0xffffffffu);
+    u32 ac = len | 1u << 17 | (read ? 1u << 16 : 0);
+    wr32(HSI2C10 + HS_AUTO_CONF, ac);
+    if (!read)
+        for (u32 i = 0; i < len; i++)
+            wr32(HSI2C10 + HS_TX, buf[i]);
+    wr32(HSI2C10 + HS_AUTO_CONF, ac | 1u << 31);
+    u64 t0 = now();
+    u32 ts = 0, n = 0;
+    while (now() - t0 < TB_HZ / 50) {                            // 20 ms
+        if (read)
+            while (n < len && !(rd32(HSI2C10 + HS_FIFO_STAT) & (1u << 24)))
+                buf[n++] = (u8)rd32(HSI2C10 + HS_RX);
+        ts = rd32(HSI2C10 + HS_TRANS_STAT);
+        if (ts & 0x1f)
+            break;
+    }
+    if (read)
+        while (n < len && !(rd32(HSI2C10 + HS_FIFO_STAT) & (1u << 24)))
+            buf[n++] = (u8)rd32(HSI2C10 + HS_RX);
+    if (got)
+        *got = n;
+    if (ts & 0x1e) {                                             // error: reset the block for the next one
+        u32 c = rd32(HSI2C10 + HS_CTL);
+        wr32(HSI2C10 + HS_CTL, c | 1u << 31);
+        wr32(HSI2C10 + HS_CTL, c & ~(1u << 31));
+        wr32(HSI2C10 + HS_CONF, 1u << 31);
+    }
+    return ts;
 }
 
 static void input_test(void)
@@ -1560,12 +1603,39 @@ static void input_test(void)
     wait_ticks(TB_HZ / 1000);
     kvh("  usi con ", rd32(HSI2C10 + 0xc4), "  option ", rd32(HSI2C10 + 0xc8));
     hs_init();
-    i2c_dump();
+    kvh("  ctl ", rd32(HSI2C10 + HS_CTL), "  conf ", rd32(HSI2C10 + HS_CONF));   // full dump: probe #9
+    // Probe #10: the touch supplies were off and are on now (L35 0x2c ->
+    // 0xec, L43 0x30 -> 0xf0, SCL/SDA high), but 0x48 gave NO_DEV_ACK.
+    // Give the chip time, watch its attn line, then scan the whole bus.
+    for (int i = 0; i < 10; i++) {
+        wait_ticks(TB_HZ / 10);
+        putch((bank_dat(PIN_ALIVE, GPA1) & 1) ? 'H' : 'L');
+    }
+    putch('\n');
+    color(DIM);
+    puts_("  ack: ");
+    color(OK);
+    u32 acks = 0;
+    for (u32 a = 0x08; a < 0x78; a++) {
+        u8 b = 0;
+        u32 got = 0, ts = hs_msg(a, 1, &b, 1, &got);
+        if ((ts & 0x1) && !(ts & 0x4)) {
+            hexv(a);
+            putch(' ');
+            acks++;
+        }
+    }
+    color(FG);
+    putch('\n');
+    kvh("  devices ", acks, "", 0);
     u8 cmd = 0x52, id[3] = { 0 };
-    u32 r1 = hs_xfer(0, &cmd, 1);
-    kvh("  write rc ", r1, "", 0);
-    u32 r2 = hs_xfer(1, id, 3);
-    kvh("  read rc ", r2, "  id ", (u32)id[0] << 16 | id[1] << 8 | id[2]);
+    u32 got = 0;
+    u32 r1 = hs_msg(0x48, 0, &cmd, 1, 0);
+    u32 r2 = hs_msg(0x48, 1, id, 3, &got);
+    kvh("  0x48 write ts ", r1, "  read ts ", r2);
+    kvh("  id ", (u32)id[0] << 16 | id[1] << 8 | id[2], "  bytes ", got);
+    r1 = (r1 & 0x1e) ? r1 : 0;
+    r2 = (r2 & 0x1e) || got < 3 ? r2 | 0x100 : 0;
     color(!r1 && !r2 ? OK : BAD);
     puts_(!r1 && !r2 ? "  TOUCH CHIP ANSWERS\n" : "  no answer\n");
 }
