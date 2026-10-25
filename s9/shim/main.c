@@ -1516,6 +1516,160 @@ static void ipclk_fix(void)
     kvh("  B sticks ", hs_timing_sticks(), "", 0);
 }
 
+
+// Bit-banged I2C on gpp1-4 (SCL) / gpp1-5 (SDA), open drain emulated:
+// high = input (released, external pull-up), low = output driving 0.
+#define BB_CON (PIN_PERIC0 + 0x20)
+#define BB_DAT (PIN_PERIC0 + 0x24)
+#define BB_PUD (PIN_PERIC0 + 0x28)
+#define BB_SCL 4
+#define BB_SDA 5
+
+static void bb_line(u32 pin, int high)
+{
+    u32 con = rd32(BB_CON) & ~(0xfu << (pin * 4));
+    if (!high) {
+        wr32(BB_DAT, rd32(BB_DAT) & ~(1u << pin));
+        con |= 1u << (pin * 4);                                  // output, 0
+    }
+    wr32(BB_CON, con);
+}
+
+static int bb_get(u32 pin) { return (rd32(BB_DAT) >> pin) & 1; }
+static void bb_delay(void) { wait_ticks(TB_HZ / 200000); }       // 5 us: ~100 kHz
+
+static int bb_scl_high(void)                                     // with clock stretching
+{
+    bb_line(BB_SCL, 1);
+    u64 t0 = now();
+    while (!bb_get(BB_SCL))
+        if (now() - t0 > TB_HZ / 100)                            // 10 ms
+            return -1;
+    return 0;
+}
+
+static void bb_start(void)
+{
+    bb_line(BB_SDA, 1);
+    bb_scl_high();
+    bb_delay();
+    bb_line(BB_SDA, 0);
+    bb_delay();
+    bb_line(BB_SCL, 0);
+    bb_delay();
+}
+
+static void bb_stop(void)
+{
+    bb_line(BB_SDA, 0);
+    bb_delay();
+    bb_scl_high();
+    bb_delay();
+    bb_line(BB_SDA, 1);
+    bb_delay();
+}
+
+// returns 0 = ACK, 1 = NACK, -1 = SCL stuck low
+static int bb_write(u32 byte)
+{
+    for (int i = 7; i >= 0; i--) {
+        bb_line(BB_SDA, (byte >> i) & 1);
+        bb_delay();
+        if (bb_scl_high())
+            return -1;
+        bb_delay();
+        bb_line(BB_SCL, 0);
+    }
+    bb_line(BB_SDA, 1);
+    bb_delay();
+    if (bb_scl_high())
+        return -1;
+    int nack = bb_get(BB_SDA);
+    bb_delay();
+    bb_line(BB_SCL, 0);
+    bb_delay();
+    return nack;
+}
+
+static u32 bb_read(int ack)
+{
+    u32 v = 0;
+    bb_line(BB_SDA, 1);
+    for (int i = 0; i < 8; i++) {
+        bb_delay();
+        bb_scl_high();
+        v = v << 1 | (u32)bb_get(BB_SDA);
+        bb_delay();
+        bb_line(BB_SCL, 0);
+    }
+    bb_line(BB_SDA, !ack);
+    bb_delay();
+    bb_scl_high();
+    bb_delay();
+    bb_line(BB_SCL, 0);
+    bb_line(BB_SDA, 1);
+    return v;
+}
+
+static void bb_test(void)
+{
+    color(HEAD);
+    puts_("Bit-banged I2C on gpp1-4/5\n");
+    wr32(BB_PUD, rd32(BB_PUD) & ~(0xfu << (BB_SCL * 4) | 0xfu << (BB_SDA * 4)));  // no pulls
+    bb_line(BB_SCL, 1);
+    bb_line(BB_SDA, 1);
+    wait_ticks(TB_HZ / 1000);
+    kvh("  idle scl ", bb_get(BB_SCL), "  sda ", bb_get(BB_SDA));
+    // 9 clocks to free a stuck slave, then STOP
+    for (int i = 0; i < 9; i++) {
+        bb_line(BB_SCL, 0);
+        bb_delay();
+        bb_scl_high();
+        bb_delay();
+    }
+    bb_stop();
+    color(DIM);
+    puts_("  ack: ");
+    color(OK);
+    u32 n = 0;
+    for (u32 a = 0x08; a < 0x78; a++) {
+        bb_start();
+        int r = bb_write(a << 1 | 1);
+        if (r == 0) {
+            (void)bb_read(0);
+            hexv(a);
+            putch(' ');
+            n++;
+        }
+        bb_stop();
+        if (r < 0) {
+            color(BAD);
+            puts_("SCL stuck ");
+            break;
+        }
+    }
+    color(FG);
+    putch('\n');
+    kvh("  devices ", n, "", 0);
+    // S6SY761 device ID: write 0x52, read 3
+    bb_start();
+    int a1 = bb_write(0x48 << 1), a2 = bb_write(0x52);
+    bb_stop();
+    bb_start();
+    int a3 = bb_write(0x48 << 1 | 1);
+    u32 id = 0;
+    if (a3 == 0) {
+        id = bb_read(1) << 16;
+        id |= bb_read(1) << 8;
+        id |= bb_read(0);
+    }
+    bb_stop();
+    kvh("  0x48 acks ", (u32)(a1 & 0xf) << 8 | (u32)(a2 & 0xf) << 4 | (u32)(a3 & 0xf), "  id ", id);
+    color(!a1 && !a2 && !a3 ? OK : BAD);
+    puts_(!a1 && !a2 && !a3 ? "  TOUCH CHIP ANSWERS (bit-bang)\n" : "  no answer (bit-bang)\n");
+    color(FG);
+}
+
 static void input_test(void)
 {
     color(HEAD);
@@ -1601,6 +1755,8 @@ static void input_test(void)
     // (pre-init HSI2C dump dropped in probe #9: it was all zeros and the
     // screen ran out of lines)
     touch_power();
+    bb_test();
+    wr32(BB_CON, (rd32(BB_CON) & ~(0xffu << 16)) | (0x22u << 16));   // back to I2C function
 
     // Touch chip: I2C pins to their I2C function (gpp1-4/5 = 2), then
     // write command 0x52 (device ID) and read 3 bytes.
