@@ -1280,17 +1280,14 @@ static void input_test(void)
     kvh("  gpa2 con ", rd32(PIN_ALIVE + 0x40), "  dat ", bank_dat(PIN_ALIVE, 2));
     kvh("  gpp1 con ", rd32(PIN_PERIC0 + 0x20), "  dat ", bank_dat(PIN_PERIC0, 1));
     color(DIM);
-    puts_("  USI sw_conf 0x10411004..30:\n  ");
+    puts_("  alive dat 0x00..0xe0: ");
     color(FG);
-    for (u32 o = 0x04; o <= 0x30; o += 4) {
-        hex(rd32(USI_SWCONF + o), 1);
+    for (u32 b = 0; b < 8; b++) {
+        hex(bank_dat(PIN_ALIVE, b), 2);
         putch(' ');
     }
     putch('\n');
-    color(HEAD);
-    puts_("hsi2c10 0x104B0000\n");
-    i2c_dump();
-
+    // (USI sw_conf at 0x10411004.. aborts on a read: secure-only, not read here.)
     // Buttons and the touch attention line, live for 20 s: press each button
     // and touch the screen; counters show every change seen.
     color(HEAD);
@@ -1325,11 +1322,27 @@ static void input_test(void)
             dec(cnt[i]);
             puts_("  ");
         }
+        // raw data registers of the first alive banks, to spot keys elsewhere
+        cur_y = row + 1;
+        cur_x = 0;
+        color(DIM);
+        puts_("raw ");
+        color(FG);
+        for (u32 b = 0; b < 6; b++) {
+            hex(bank_dat(PIN_ALIVE, b), 2);
+            putch(' ');
+        }
         wait_ticks(TB_HZ / 50);
     }
-    cur_y = row + 1;
+    cur_y = row + 2;
     cur_x = 0;
     putch('\n');
+
+    // Everything below may abort if the block is gated or secure: the
+    // exception screen then shows where. Button results are already shown.
+    color(HEAD);
+    puts_("hsi2c10 0x104B0000\n");
+    i2c_dump();
 
     // Touch chip: I2C pins to their I2C function (gpp1-4/5 = 2), then
     // write command 0x52 (device ID) and read 3 bytes.
