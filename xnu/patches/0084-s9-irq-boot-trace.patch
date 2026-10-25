@@ -1,0 +1,56 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -79,8 +79,14 @@ IOKitInitializeTime( void )
+ 
+ // RTC is not present on this target
+ #ifndef BCM2837
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	IOLog("SWEET: waiting up to 30 s for IORTC\n");
++#endif
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	IOLog("SWEET: IORTC wait over, initializing calendar\n");
++#endif
+ #endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(
+@@ -88,6 +94,9 @@ IOKitInitializeTime( void )
+ #endif
+ 
+ 	clock_initialize_calendar();
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	IOLog("SWEET: calendar initialized\n");
++#endif
+ }
+ 
+ void
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1866,9 +1866,26 @@ sleh_irq(arm_saved_state_t *state)
+ 	uint64_t iar = sweet_gic_ack();
+ 	uint32_t intid = sweet_gic_intid(iar);
+ 
++	/*
++	 * Bring-up trace (S9): the 1st-3rd and every 2^n-th timer interrupt,
++	 * the first few others and spurious ones. kprintf masks interrupts
++	 * around its lock, so this cannot re-enter itself.
++	 */
++	static uint32_t sweet_irq_timer, sweet_irq_other, sweet_irq_spurious;
+ 	if (intid >= 1020 && intid <= 1023) {
++		if (++sweet_irq_spurious <= 3) {
++			kprintf("SWEET IRQ: spurious 0x%llx (#%u)\n", iar, sweet_irq_spurious);
++		}
+ 		return; /* spurious */
+ 	}
++	if (intid == sweet_vtimer_intid) {
++		uint32_t n = ++sweet_irq_timer;
++		if (n <= 3 || (n & (n - 1)) == 0) {
++			kprintf("SWEET IRQ: timer #%u\n", n);
++		}
++	} else if (++sweet_irq_other <= 8) {
++		kprintf("SWEET IRQ: intid %u iar 0x%llx (#%u)\n", intid, iar, sweet_irq_other);
++	}
+ 	if (intid == sweet_vtimer_intid) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+ 		cdp->cpu_decrementer = -1; /* Large */
