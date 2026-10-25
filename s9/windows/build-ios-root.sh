@@ -39,8 +39,12 @@ if ! command -v apfs-fuse >/dev/null; then
 	apt-get install -y -q cmake g++ libfuse3-dev zlib1g-dev libbz2-dev libattr1-dev liblzma-dev >/dev/null
 	rm -rf /root/apfs-fuse
 	git clone -q --recursive https://github.com/sgan81/apfs-fuse /root/apfs-fuse
-	cmake -S /root/apfs-fuse -B /root/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release >/dev/null
-	make -C /root/apfs-fuse/build -j"$(nproc)" >/dev/null
+	# New CMake refuses its old minimum version; new GCC wants <cstdint> spelled out.
+	cmake -S /root/apfs-fuse -B /root/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS="-include cstdint" \
+		-DCMAKE_C_FLAGS="-Wno-error" >/dev/null
+	make -C /root/apfs-fuse/build -j"$(nproc)" 2>&1 | grep -E "error|Error" || true
+	[ -x /root/apfs-fuse/build/apfs-fuse ] || { echo "RESULT: APFS_FUSE_BUILD_FAILED"; exit 5; }
 	install -m 755 /root/apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
 fi
 command -v apfs-fuse mkfs.hfsplus fsck.hfsplus
