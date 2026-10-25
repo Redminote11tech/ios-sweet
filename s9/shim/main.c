@@ -1362,10 +1362,8 @@ static void input_test(void)
 
     // Everything below may abort if the block is gated or secure: the
     // exception screen then shows where. Button results are already shown.
-    color(HEAD);
-    puts_("hsi2c10 0x104B0000\n");
-    i2c_dump();
-
+    // (pre-init HSI2C dump dropped in probe #9: it was all zeros and the
+    // screen ran out of lines)
     // Touch chip: I2C pins to their I2C function (gpp1-4/5 = 2), then
     // write command 0x52 (device ID) and read 3 bytes.
     color(HEAD);
@@ -1448,9 +1446,21 @@ static void input_test(void)
         safe_faults = 0;
         u32 c = safe_rd32(0x1041102CUL);
         kvh("  after write ", c, "  faults w/r ", fw << 4 | safe_faults);
+        // Probe #8: 0x1041102C took the value but hsi2c10 stayed dead. The
+        // stock DT has two I2C-mode USIs (0x1041101C, 0x1041102C) and two
+        // enabled HSI2Cs (0x104B0000, 0x104C0000); by position 0x1041101C
+        // (index 6 from 0x10411004) is 0x104B0000. Both are I2C in Android.
+        safe_faults = 0;
+        u32 d0 = safe_rd32(0x1041101CUL);
+        safe_wr32(0x1041101CUL, 1u << 2);
+        u32 d1 = safe_rd32(0x1041101CUL);
+        kvh("  101c before ", d0, "  after ", d1);
+        kvh("  faults ", safe_faults, "", 0);
     }
     // USI v2 wrapper (+0xc4 USI_CON bit0 = reset, +0xc8 USI_OPTION):
     // release the reset, clock request on, clock stop off (Linux exynos-usi).
+    wr32(HSI2C10 + 0xc4, rd32(HSI2C10 + 0xc4) | 1u);     // reset after the mode change
+    wait_ticks(TB_HZ / 1000);
     wr32(HSI2C10 + 0xc8, (rd32(HSI2C10 + 0xc8) & ~(1u << 2)) | (1u << 1));
     wr32(HSI2C10 + 0xc4, rd32(HSI2C10 + 0xc4) & ~1u);
     wait_ticks(TB_HZ / 1000);
