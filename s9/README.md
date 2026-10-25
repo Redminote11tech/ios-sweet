@@ -13,7 +13,7 @@ For the Snapdragon S9 (SM-G9600), see the separate [ios-s9](https://github.com/s
 | 3. XNU core | XNU console text on the S9 screen | done (PID 1 from a RAM disk) |
 | 4. UFS + iOS root | Apple launchd from internal flash | done (iOS 16.7.16 root on USERDATA, read-write) |
 | 5. iOS services | SpringBoard lock screen | done (2026-10-25, centred 1125x2436 on the 1440x2960 panel) |
-| 6. Touch + buttons | unlock by swiping | not started |
+| 6. Touch + buttons | unlock by swiping | done (2026-10-25: S6SY761 over bit-banged I2C, gpio keys; home screen reached) |
 
 ## Hardware facts (measured on the phone)
 
