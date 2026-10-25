@@ -80,7 +80,10 @@ def build(seed=None):
     cpu_nodes = []
     for core in range(8):
         big = core >= 4
-        mpidr = (0x100 | (core - 4)) if big else (core << 8)
+        # Mongoose MPIDR Aff1:Aff0 = 0x10n collides with A55 core 1 (0x100):
+        # XNU maps nodes to CPUs by 'reg', so the big cores get a placeholder
+        # Aff2 = 1 until they can actually be started.
+        mpidr = (0x10100 | (core - 4)) if big else (core << 8)
         psci_id = (0x100 | (core - 4)) if big else core
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
