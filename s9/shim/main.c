@@ -2163,49 +2163,30 @@ static void smp_try(u64 mpidr, u64 entry, u32 ctx, int pmuseq, int sgi)
 static void smp_test(void)
 {
     color(HEAD);
-    puts_("SMP probe 7 (t8): who are you?\n");
+    puts_("SMP probe 8 (t8): high entry like XNU\n");
     for (int i = 0; i < 0x400; i += 4)
         wr32(SMP_MBOX + i, 0);
-    // chain: little 1 -> 2 -> 3 (slots 4, 8, 12 if MPIDR Aff1 = core)
-    wr32(SMP_MBOX + 0x200 + 4 * 4, 2);
-    wr32(SMP_MBOX + 0x200 + 8 * 4, 3);
-    wr32(SMP_MBOX + 0x200 + 1 * 4, 2);      // in case Aff0 = core after all
-    wr32(SMP_MBOX + 0x200 + 2 * 4, 3);
-    __asm__ volatile("dsb sy" ::: "memory");
-    u64 m0;
-    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(m0));
-    kvh("  boot core MPIDR_EL1 ", m0, "  ITARGETSR0 ", safe_rd32(GICD + 0x800));
-    kvh("  CPU_ON(1) rc ", (u32)psci(0xC4000003UL, 1, (u64)smp_entry, 0), "", 0);
-    wait_ticks(3 * TB_HZ);
-    int y = cur_y;
-    for (;;) {
-        cur_y = y;
-        cur_x = 0;
-        color(HEAD);
-        puts_("slot: hello / MPIDR / chain / count (1 s refresh)\n");
-        for (int i = 0; i < 16; i++) {
-            u64 mb = SMP_MBOX + i * 16;
-            u32 h = rd32(mb);
-            if (!h && !rd32(mb + 4))
-                continue;
-            color(h >> 16 == 0x5ec0 ? OK : FG);
-            hexv(i);
-            puts_(": ");
-            hexv(h);
-            putch(' ');
-            hexv(rd32(mb + 4));
-            putch(' ');
-            hexv(rd32(mb + 8));
-            putch(' ');
-            hexv(rd32(mb + 12));
-            putch('\n');
-        }
-        color(DIM);
-        puts_("  (rows above a slot that stops being listed are stale)\n");
-        for (int n = 0; n < 4; n++)
-            kvh("  little st ", safe_rd32(PMU + 0x2024 + n * 8), "  cfg ", safe_rd32(PMU + 0x2020 + n * 8));
-        wait_ticks(TB_HZ);
-    }
+    // no chain
+    u64 hi = 0x88148e000UL;                 // XNU's sweet_secondary_entry PA
+    u32 n = (u32)(smp_entry_end - smp_entry);
+    for (u32 i = 0; i < n; i += 4)
+        wr32(hi + i, rd32((u64)smp_entry + i));
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+    kvh("  copied bytes ", n, "  check ", rd32(hi) == rd32((u64)smp_entry));
+    kvh("  CPU_ON(1) high rc ", (u32)psci(0xC4000003UL, 1, hi, 0), "", 0);
+    wait_ticks(2 * TB_HZ);
+    kvh("  core1 hello ", rd32(SMP_MBOX + 4 * 16), "  count ", rd32(SMP_MBOX + 4 * 16 + 12));
+    color(rd32(SMP_MBOX + 64) >> 16 == 0x5ec0 ? OK : BAD);
+    puts_(rd32(SMP_MBOX + 64) >> 16 == 0x5ec0 ? "  HIGH ENTRY WORKS\n" : "  high entry: core did not run\n");
+    color(FG);
+    kvh("  CPU_ON(2) low rc ", (u32)psci(0xC4000003UL, 2, (u64)smp_entry, 0), "", 0);
+    wait_ticks(2 * TB_HZ);
+    kvh("  core2 hello ", rd32(SMP_MBOX + 8 * 16), "  count ", rd32(SMP_MBOX + 8 * 16 + 12));
+    color(rd32(SMP_MBOX + 128) >> 16 == 0x5ec0 ? OK : BAD);
+    puts_(rd32(SMP_MBOX + 128) >> 16 == 0x5ec0 ? "  LOW ENTRY WORKS\n" : "  low entry: core did not run\n");
+    color(FG);
+    for (;;)
+        __asm__ volatile("wfe");
 }
 #endif
 
