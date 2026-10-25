@@ -2169,39 +2169,103 @@ static void slot_line(int slot)
         safe_rd32(PMU + core_status_off(slot < 4 ? slot : 0x100 + (slot & 3))));
 }
 
+// CLUSTER0 (little) CPUn: CONFIGURATION 0x2020+n*8, STATUS +4 (flexpmu table)
+#define LCFG(n) (PMU + 0x2020 + (n) * 8)
+#define LST(n)  (PMU + 0x2024 + (n) * 8)
+
+static void cs(const char *tag, int n)
+{
+    kvh(tag, safe_rd32(LCFG(n)), "  st ", safe_rd32(LST(n)));
+}
+
+static int hello(int slot)
+{
+    return rd32(SMP_MBOX + slot * 16) >> 16 == 0x5ec0;
+}
+
+static void verdict(int slot)
+{
+    color(hello(slot) ? OK : BAD);
+    puts_(hello(slot) ? "  CORE RAN\n" : "  no hello\n");
+    color(FG);
+}
+
 static void smp_test(void)
 {
     color(HEAD);
-    puts_("SMP probe 5 (t8): self-reporting cores\n");
-    kvh("  GICD_ITARGETSR0 ", safe_rd32(GICD + 0x800), "  GICD_CTLR ", safe_rd32(GICD));
+    puts_("SMP probe 6 (t8): PMU CONFIGURATION\n");
     for (int i = 0; i < 0x400; i += 4)
         wr32(SMP_MBOX + i, 0);
-    // chain table: little 1 -> 2 -> 3, big 0x100 -> 0x101 -> 0x102 -> 0x103
-    wr32(SMP_MBOX + 0x200 + 1 * 4, 2);
-    wr32(SMP_MBOX + 0x200 + 2 * 4, 3);
-    wr32(SMP_MBOX + 0x200 + 4 * 4, 0x101);
-    wr32(SMP_MBOX + 0x200 + 5 * 4, 0x102);
-    wr32(SMP_MBOX + 0x200 + 6 * 4, 0x103);
     __asm__ volatile("dsb sy" ::: "memory");
+    for (int n = 0; n < 4; n++)
+        cs("  L cfg ", n);
+    kvh("  B cfg0 ", safe_rd32(PMU + 0x2000), "  st ", safe_rd32(PMU + 0x2004));
+    kvh("  noncpu B ", safe_rd32(PMU + 0x2040), "  st ", safe_rd32(PMU + 0x2044));
+    kvh("  noncpu L ", safe_rd32(PMU + 0x2048), "  st ", safe_rd32(PMU + 0x204c));
+    kvh("  rstseq ", safe_rd32(PMU + 0x500), "  etc_rst L0 ", safe_rd32(PMU + 0x3c4c));
+    kvh("  BID1 ", safe_rd32(0x14070100UL), "  BID2 ", safe_rd32(0x14070200UL));
+
     color(HEAD);
-    puts_("cpu 1 (little) CPU_ON, then 2 s\n");
+    puts_("A. CPU_ON(1)\n");
     u64 rc = psci(0xC4000003UL, 1, (u64)smp_entry, 0);
-    wait_ticks(2 * TB_HZ);
-    kvh("  rc ", (u32)rc, "  hello ", rd32(SMP_MBOX + 16));
+    cs("  rc/cfg ", 1);
+    wait_ticks(TB_HZ / 10);
+    cs("  100ms cfg ", 1);
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 1);
+    kvh("  rc ", (u32)rc, "", 0);
+    verdict(1);
+
     color(HEAD);
-    puts_("cpu 0x100 (big) CPU_ON (froze in probe 2)\n");
-    color(FG);
-    puts_("  calling firmware...\n");
-    rc = psci(0xC4000003UL, 0x100, (u64)smp_entry, 0);
-    kvh("  returned rc ", (u32)rc, "", 0);
-    wait_ticks(2 * TB_HZ);
+    puts_("B. core 1: CONFIGURATION[19:16] = 0xF (release)\n");
+    safe_wr32(LCFG(1), safe_rd32(LCFG(1)) | 0xf0000);
+    cs("  now cfg ", 1);
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 1);
+    verdict(1);
+
+    color(HEAD);
+    puts_("C. core 1: CONFIGURATION[19:16] = 0\n");
+    safe_wr32(LCFG(1), safe_rd32(LCFG(1)) & ~0xf0000u);
+    cs("  now cfg ", 1);
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 1);
+    verdict(1);
+
+    color(HEAD);
+    puts_("D. core 1: BID1/BID2 bit 5 clear\n");
+    safe_wr32(0x14070100UL, safe_rd32(0x14070100UL) & ~(1u << 5));
+    safe_wr32(0x14070200UL, safe_rd32(0x14070200UL) & ~(1u << 5));
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 1);
+    verdict(1);
+
+    color(HEAD);
+    puts_("E. core 2: release first, then CPU_ON(2)\n");
+    safe_wr32(LCFG(2), safe_rd32(LCFG(2)) | 0xf0000);
+    cs("  pre cfg ", 2);
+    rc = psci(0xC4000003UL, 2, (u64)smp_entry, 0);
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 2);
+    kvh("  rc ", (u32)rc, "", 0);
+    verdict(2);
+
+    color(HEAD);
+    puts_("F. core 3: CONFIGURATION[3:0] = 0xF, no PSCI\n");
+    safe_wr32(LCFG(3), safe_rd32(LCFG(3)) | 0xf);
+    cs("  now cfg ", 3);
+    wait_ticks(TB_HZ);
+    cs("  1s cfg ", 3);
+    verdict(3);
+    kvh("  faults ", safe_faults, "", 0);
+
     int y = cur_y;
     for (;;) {
         cur_y = y;
         cur_x = 0;
         color(HEAD);
         puts_("slots (refreshes every second):\n");
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < 4; i++)
             slot_line(i);
         wait_ticks(TB_HZ);
     }
