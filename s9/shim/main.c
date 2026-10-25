@@ -922,6 +922,17 @@ static u32 ufs_nop(u32 *ocs)
     return ucd_buf.resp[0] == 0x20 && ucd_buf.resp[3] == 0x7f ? 0 : 2;
 }
 
+// Response UPIU after CHECK CONDITION: header bytes 4-7 (response, status),
+// then the data segment at byte 32: 2-byte sense length + fixed-format sense.
+static void ufs_sense(void)
+{
+    const u8 *r = ucd_buf.resp;
+    const u8 *sd = r + 34;
+    u32 sl = (u32)r[32] << 8 | r[33];
+    kvh("    resp ", rbe32(r + 4), "  sense len ", sl);
+    kvh("    key ", sd[2] & 0xf, "  asc/ascq ", (u32)sd[12] << 8 | sd[13]);
+}
+
 static void __attribute__((unused)) ufs_probe(void)
 {
     color(HEAD);
@@ -1013,21 +1024,25 @@ static void __attribute__((unused)) ufs_probe(void)
     }
     static const u8 tur[6] = { 0 };
     kvh("  nexus ", vs_rd(VS_UTRL_NEXUS_TYPE), "  is ", ufs_rd(0x20));
-    for (int i = 0; i < 4 && rc; i++) {     // the first answer is a unit attention
+    rc = 1;
+    for (int i = 0; i < 6 && rc; i++) {     // unit attentions first (power on, reset, ...)
         rc = ufs_scsi(tur, 6, 0, 0, &ocs, &st);
         kvh("  TUR rc ", rc, "  ocs/st ", ocs << 8 | st);
-        kvh("    is ", ufs_is_before, " -> ", ufs_is_after);
+        if (rc)
+            ufs_sense();
     }
     static const u8 cap10[10] = { 0x25 };
     rc = ufs_scsi(cap10, 10, ufs_data, 8, &ocs, &st);
     kvh("  CAP rc ", rc, "  ocs/st ", ocs << 8 | st);
+    if (rc)
+        ufs_sense();
     if (!rc)
         kvh("  LUN0 last lba ", rbe32(ufs_data), "  block ", rbe32(ufs_data + 4));
 
     static const u8 rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };   // LBA 0, 2 blocks
     rc = ufs_scsi(rd10, 10, ufs_data, 2 * UFS_BLOCK, &ocs, &st);
     if (rc)
-        kvh("  resp0 ", rbe32(ucd_buf.resp), "  resp4 ", rbe32(ucd_buf.resp + 4));
+        ufs_sense();
     kvh("  READ rc ", rc, "  ocs/st ", ocs << 8 | st);
     if (rc)
         return;

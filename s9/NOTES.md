@@ -4,6 +4,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **t5 probe #5 (observed, 11:22): NOP handshake works.** Lanes already 2/2 after S-Boot on this phone (link startup not needed, unlike the friend's), `NOP rc 0 ocs 0`, NOP IN `0x2000007f`. Nexus register reads `0xfffe` after clearing bit 0 (S-Boot marks all slots SCSI). A probe bug skipped TUR (rc left 0 by the NOP loop); CAP (tag 1) and READ (tag 2) got OCS 7 + response 1 / status CHECK CONDITION. Probe #6 fixes the loop (6 TUR retries) and prints the sense key/ASC/ASCQ.
+
 - **External findings (a friend of the user, same SM-G960F + XNU 22.6.0; reported, not verified here):** after S-Boot HCS=0x10f but PA_CONNECTEDTXDATALANES (0x1561) / RX (0x1581) read 0; NOP timed out (DBR=1, OCS 0xf). Fix: stop lists, DME_LINK_STARTUP (0x16), check UniPro+0x7854 (UFSHCD_QUIRK_GET_GENERRCODE_DIRECT), lanes 0/0 -> 2/2, then DME_SET 0x3000=0, 0x3001=1, 0x4021=1, 0x4020=1, restart lists, NOP IN OK. Only the NOP handshake was proven. They also have polled DWC3 CDC-ACM logging (DWC3 0x10c00000, globals at +0xc100; USB2 PHY 0x11100000; PMU 0x14060000 USB2 isolation +0x72c; dis-u2-freeclk quirk; EP0 OUT capacity rounded to 64). Reference: Samsung/LineageOS universal9810 kernel 5a2dd7d6f3a05168d2f1303c3b29e9e9fa39b781 (ufs-cal-9810.c, ufs-exynos.c, phy-exynos-usb3p1.c, dwc3).
 - **t5 probe #5** (supersedes #4, which was not flashed): reads the connected lane counts; if 0, link startup + CPort setup as above; NOP OUT/IN handshake (nexus bit cleared); then TUR/CAP/READ with the nexus bit set and OCS 7 treated as check-the-response.
 
