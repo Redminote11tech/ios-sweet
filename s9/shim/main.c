@@ -750,6 +750,8 @@ static u32 rbe32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)
 static u64 rle64(const u8 *p) { u64 v = 0; for (int i = 7; i >= 0; i--) v = v << 8 | p[i]; return v; }
 
 // One SCSI command (read direction or no data) in slot 0. 0 = success.
+static u32 ufs_lun;                         // UPIU LUN for the next ufs_scsi()
+
 static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u32 *st)
 {
     static u8 tag;
@@ -757,7 +759,7 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
     zero(&ucd_buf, sizeof(struct ucd));
     ucd_buf.cmd[0] = 0x01;                  // COMMAND UPIU
     ucd_buf.cmd[1] = len ? 0x40 : 0x00;     // R
-    ucd_buf.cmd[2] = 0;                     // LUN 0
+    ucd_buf.cmd[2] = ufs_lun;               // 0 = LUN 0, 0xd0 = UFS device W-LUN
     ucd_buf.cmd[3] = ++tag;
     ucd_buf.cmd[12] = len >> 24;
     ucd_buf.cmd[13] = len >> 16;
@@ -1024,6 +1026,21 @@ static void __attribute__((unused)) ufs_probe(void)
     }
     static const u8 tur[6] = { 0 };
     kvh("  nexus ", vs_rd(VS_UTRL_NEXUS_TYPE), "  is ", ufs_rd(0x20));
+
+    // Probe #6: LUN 0 answers NOT READY, ASC/ASCQ 04/02 "initializing command
+    // required": S-Boot left the UFS device powered down. Wake it like Linux's
+    // ufshcd_set_dev_pwr_mode(): START STOP UNIT, power condition ACTIVE (1),
+    // to the UFS device well-known LUN 0xd0. A power command; no data written.
+    static const u8 ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+    ufs_lun = 0xd0;
+    rc = 1;
+    for (int i = 0; i < 4 && rc; i++) {
+        rc = ufs_scsi(ssu, 6, 0, 0, &ocs, &st);
+        kvh("  SSU rc ", rc, "  ocs/st ", ocs << 8 | st);
+        if (rc)
+            ufs_sense();
+    }
+    ufs_lun = 0;
     rc = 1;
     for (int i = 0; i < 6 && rc; i++) {     // unit attentions first (power on, reset, ...)
         rc = ufs_scsi(tur, 6, 0, 0, &ocs, &st);

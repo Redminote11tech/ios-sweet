@@ -32,3 +32,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 - **s9-image workflow** packages the image (artifact `s9-xnu-image` + branch `s9-builds`, which this session can fetch; artifact/log downloads are blocked here). Loader host test passes: all 10 segments, ADT and boot_args land where expected.
 - `xnu-Image` 16.7 MB sent to the user for the first XNU boot. Gate: XNU console text. Expect the white band bottom-left (start.s stage 0) and "SWEET EARLY n" lines if the kernel starts.
 - Phone screen has an old water-damage defect (garbage at boot sometimes); test screens drew cleanly.
+
+## 2026-10-25 UFS probe #6 result, probe #7
+
+- Probe #6 (nexus bit, 4 KiB PRDT, OCS 7 quirk, TUR retry fixed): every TUR, READ CAPACITY and READ(10) on LUN 0 completes with rc 4, resp 0x102 (CHECK CONDITION), sense len 0x12, **sense key 2 NOT READY, ASC/ASCQ 04/02 "initializing command required"**. Transport works; the device was left powered down by S-Boot.
+- Probe #7: before TUR, send START STOP UNIT (0x1b, byte 4 = 0x10, power condition ACTIVE) to the UFS device W-LUN 0xd0, as Linux ufshcd_set_dev_pwr_mode() does. Power command only, no media writes. Then TUR/CAP/READ GPT as before.
