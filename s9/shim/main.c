@@ -823,6 +823,105 @@ static u32 ufs_read(u32 lba, u32 count, void *buf)
     return ufs_scsi(cdb, 10, buf, count * UFS_BLOCK, &ocs, &st);
 }
 
+
+// ---- UniPro (UIC) commands. Link bring-up after S-Boot, following a friend's
+// working Exynos 9810 sequence: the HCS bits say "ready" but the connected
+// lane counts read 0 until DME_LINK_STARTUP + CPort setup.
+#define UFS_UNIPRO 0x11110000UL
+#define UIC_GET 0x01
+#define UIC_SET 0x02
+#define UIC_LINK_STARTUP 0x16
+#define IS_UCCS (1u << 10)
+
+// Returns the UIC result code (0 = success), 0xff on timeout; *val = ARG3.
+static u32 uic_cmd(u32 cmd, u32 attr, u32 set_val, u32 *val)
+{
+    u64 t0 = now();
+    while (!(ufs_rd(0x30) & (1u << 3)))     // HCS.UCRDY
+        if (now() - t0 > TB_HZ)
+            return 0xfe;
+    ufs_wr(0x20, IS_UCCS);
+    ufs_wr(0x94, attr << 16);               // ARG1: attribute ID, selector 0
+    ufs_wr(0x98, 0);                        // ARG2: attr set type normal
+    ufs_wr(0x9c, set_val);                  // ARG3
+    __asm__ volatile("dsb sy" ::: "memory");
+    ufs_wr(0x90, cmd);
+    t0 = now();
+    while (!(ufs_rd(0x20) & IS_UCCS))
+        if (now() - t0 > TB_HZ / 2)
+            return 0xff;
+    ufs_wr(0x20, IS_UCCS);
+    if (val)
+        *val = ufs_rd(0x9c);
+    return ufs_rd(0x98) & 0xff;
+}
+
+static u32 dme_get(u32 attr)
+{
+    u32 v = 0xdead;
+    u32 r = uic_cmd(UIC_GET, attr, 0, &v);
+    return r ? 0xe0000000 | r : v;
+}
+
+static void ufs_link_up(void)
+{
+    u32 tx = dme_get(0x1561), rx = dme_get(0x1581);   // PA_CONNECTED{TX,RX}DATALANES
+    kvh("  lanes tx ", tx, "  rx ", rx);
+    if (tx && tx < 0x10 && rx && rx < 0x10) {
+        color(OK);
+        puts_("  link already up\n");
+        return;
+    }
+    ufs_wr(0x60, 0);                        // stop the transfer request list
+    ufs_wr(0x80, 0);                        // and the task management list
+    u32 r = uic_cmd(UIC_LINK_STARTUP, 0, 0, 0);
+    u32 cnf = *(volatile u32 *)(UFS_UNIPRO + 0x7854);  // Exynos direct result
+    kvh("  link startup ", r, "  cnf ", cnf);
+    tx = dme_get(0x1561);
+    rx = dme_get(0x1581);
+    kvh("  lanes tx ", tx, "  rx ", rx);
+    // CPort setup in Samsung's order: N_DEVICEID, N_DEVICEID_VALID,
+    // T_PEERDEVICEID, T_CONNECTIONSTATE.
+    static const u32 attrs[4][2] = { { 0x3000, 0 }, { 0x3001, 1 }, { 0x4021, 1 }, { 0x4020, 1 } };
+    for (int i = 0; i < 4; i++)
+        uic_cmd(UIC_SET, attrs[i][0], attrs[i][1], 0);
+    kvh("  devid ", dme_get(0x3000) << 4 | dme_get(0x3001), "  peer/conn ",
+        dme_get(0x4021) << 4 | dme_get(0x4020));
+}
+
+// NOP OUT -> NOP IN handshake in slot 0 (no data). 0 = NOP IN received.
+static u32 ufs_nop(u32 *ocs)
+{
+    zero(&utrl[0], sizeof(utrl[0]));
+    zero(&ucd_buf, sizeof(struct ucd));
+    ucd_buf.cmd[0] = 0x00;                  // NOP OUT
+    ucd_buf.cmd[3] = 0x7f;                  // tag
+    u64 ucd_pa = (u64)&ucd_buf;
+    u32 unit = ufs_bytes ? 1 : 4;
+    utrl[0].dw0 = (ufs_ct << 28) | (1u << 24);
+    utrl[0].dw2 = 0x0f;
+    utrl[0].ucdba = (u32)ucd_pa;
+    utrl[0].ucdbau = (u32)(ucd_pa >> 32);
+    utrl[0].resp = (1024u / unit) << 16 | (1024u / unit);
+    __asm__ volatile("dsb sy" ::: "memory");
+    vs_wr(VS_UTRL_NEXUS_TYPE, vs_rd(VS_UTRL_NEXUS_TYPE) & ~1u);   // not a SCSI command
+    u32 is = ufs_rd(0x20);
+    if (is)
+        ufs_wr(0x20, is);
+    __asm__ volatile("dsb sy" ::: "memory");
+    ufs_wr(0x58, 1);
+    u64 t0 = now();
+    while (ufs_rd(0x58) & 1)
+        if (now() - t0 > TB_HZ) {
+            *ocs = utrl[0].dw2 & 0xff;
+            ufs_wr(0x5c, ~1u);
+            return 1;
+        }
+    __asm__ volatile("dsb sy" ::: "memory");
+    *ocs = utrl[0].dw2 & 0xff;
+    return ucd_buf.resp[0] == 0x20 && ucd_buf.resp[3] == 0x7f ? 0 : 2;
+}
+
 static void __attribute__((unused)) ufs_probe(void)
 {
     color(HEAD);
@@ -891,6 +990,7 @@ static void __attribute__((unused)) ufs_probe(void)
         puts_("  requests outstanding: stop\n");
         return;
     }
+    ufs_link_up();
     // Take over the transfer request list; never ring a doorbell unless the
     // host really uses ours (else it would run S-Boot's slot 0 again).
     ufs_wr(0x60, 0);
@@ -906,6 +1006,11 @@ static void __attribute__((unused)) ufs_probe(void)
     }
 
     u32 ocs = 0, st = 0, rc = 1;
+    for (int i = 0; i < 3 && rc; i++) {
+        rc = ufs_nop(&ocs);
+        kvh("  NOP rc ", rc, "  ocs ", ocs);
+        kvh("    resp ", rbe32(ucd_buf.resp), "  dbr ", ufs_rd(0x58));
+    }
     static const u8 tur[6] = { 0 };
     kvh("  nexus ", vs_rd(VS_UTRL_NEXUS_TYPE), "  is ", ufs_rd(0x20));
     for (int i = 0; i < 4 && rc; i++) {     // the first answer is a unit attention
