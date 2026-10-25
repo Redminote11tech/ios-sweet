@@ -1396,7 +1396,7 @@ static void input_test(void)
         }
         putch('\n');
         u32 n = 0, on = 0, miss = 0, col = 0;
-        for (u32 o = 0x2000; o < 0x2200; o += 4) {
+        for (u32 o = 0x2000; o < 0x3000; o += 4) {
             safe_faults = 0;
             u32 v = safe_rd32(cmu + o);
             if (safe_faults) {
@@ -1424,6 +1424,30 @@ static void input_test(void)
         putch('\n');
         kvh("  gates ", n, "  switched on ", on);
         kvh("  missing ", miss, "", 0);
+    }
+
+    // Probe #7: all PERIC0 gates found were already on, the USI wrapper
+    // answers (+0xcc version 0x2070000) but the HSI2C registers read 0: the
+    // USI is not in I2C mode. Its mode is SYSREG_PERIC0 USI SW_CONF, for this
+    // bus usi10 = 0x1041102C (stock DT: usi_v2_mode "i2c"); Linux exynos-usi:
+    // SW_CONF I2C = BIT(2). Earlier a plain read of 0x10411004 aborted.
+    color(HEAD);
+    puts_("SYSREG_PERIC0 usi10 sw_conf 0x1041102C\n");
+    {
+        safe_faults = 0;
+        u32 a = safe_rd32(0x10410000UL);
+        u32 fa = safe_faults;
+        safe_faults = 0;
+        u32 b = safe_rd32(0x1041102CUL);
+        u32 fb = safe_faults;
+        kvh("  +0000 ", a, fa ? "  FAULT  +102c " : "  +102c ", b);
+        kvh("  faults ", fa << 4 | fb, "", 0);
+        safe_faults = 0;
+        safe_wr32(0x1041102CUL, 1u << 2);
+        u32 fw = safe_faults;
+        safe_faults = 0;
+        u32 c = safe_rd32(0x1041102CUL);
+        kvh("  after write ", c, "  faults w/r ", fw << 4 | safe_faults);
     }
     // USI v2 wrapper (+0xc4 USI_CON bit0 = reset, +0xc8 USI_OPTION):
     // release the reset, clock request on, clock stop off (Linux exynos-usi).
