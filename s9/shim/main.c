@@ -1448,6 +1448,74 @@ static void hs_samsung(int mode)
     wr32(HSI2C10 + HS_TIMEOUT, rd32(HSI2C10 + HS_TIMEOUT) & ~(1u << 31));
 }
 
+
+// Does the HSI2C take a timing write? (FS3 div field; needs the IP clock)
+static int hs_timing_sticks(void)
+{
+    u32 c = rd32(HSI2C10 + HS_CTL);
+    wr32(HSI2C10 + HS_CTL, c | 1u << 31);
+    wr32(HSI2C10 + HS_CTL, c & ~(1u << 31));
+    u32 old = rd32(HSI2C10 + HS_FS3);
+    u32 want = (old & ~0xff0000u) | (0x21u << 16);
+    wr32(HSI2C10 + HS_FS3, want);
+    u32 got = rd32(HSI2C10 + HS_FS3);
+    wr32(HSI2C10 + HS_FS3, old);
+    return got == want;
+}
+
+// Gate-shaped registers (bits 20/21/28/29 only) in [lo, hi) of a CMU: manual
+// mode + clock on, like Linux exynos_arm64_init_clocks + clk_enable.
+static u32 cmu_gates_on(u64 cmu, u32 lo, u32 hi)
+{
+    u32 on = 0;
+    for (u32 o = lo; o < hi; o += 4) {
+        safe_faults = 0;
+        u32 v = safe_rd32(cmu + o);
+        if (safe_faults || (v & ~0x30300000u))
+            continue;
+        if (!(v & (1u << 21)) || (v & (1u << 28))) {
+            safe_wr32(cmu + o, (v & ~(1u << 28)) | 1u << 20 | 1u << 21);
+            on++;
+        }
+    }
+    return on;
+}
+
+static void ipclk_fix(void)
+{
+    color(HEAD);
+    puts_("HSI2C IP clock\n");
+    kvh("  timing sticks ", hs_timing_sticks(), "", 0);
+    if (hs_timing_sticks())
+        return;
+    // A: CMU_TOP (0x15a80000, as Exynos 8895) gates incl. CLKCMU_PERIC0_*
+    u32 n = cmu_gates_on(0x15a80000UL, 0x2000, 0x2400);
+    kvh("  A top gates on ", n, "  sticks ", hs_timing_sticks());
+    if (hs_timing_sticks())
+        return;
+    // B: CMU_PERIC0 user muxes (PLL_CON0 .._USER at 0x100 + 0x20 i, bit 4 =
+    // CMU clock, 0 = OSCCLK): every USI mux (i >= 2: not BUS, not UART_DBG)
+    // to the 26 MHz oscillator, which always runs.
+    color(DIM);
+    puts_("  B mux ");
+    color(FG);
+    for (u32 i = 2; i < 16; i++) {
+        u64 a = 0x10400000UL + 0x100 + 0x20 * i;
+        safe_faults = 0;
+        u32 v = safe_rd32(a);
+        if (safe_faults)
+            continue;
+        hex(i, 1);
+        putch(':');
+        hex(v & 0xff, 2);
+        putch(' ');
+        if (v & (1u << 4))
+            safe_wr32(a, v & ~(1u << 4));
+    }
+    putch('\n');
+    kvh("  B sticks ", hs_timing_sticks(), "", 0);
+}
+
 static void input_test(void)
 {
     color(HEAD);
@@ -1645,6 +1713,7 @@ static void input_test(void)
         putch((bank_dat(PIN_ALIVE, GPA1) & 1) ? 'H' : 'L');
     }
     putch('\n');
+    ipclk_fix();
     // Probe #11: attn stays low (event pending: the chip is up), 0x48 read
     // aborted without NO_DEV_ACK -> bus timing. Try Samsung's init with four
     // timings; one ID read (write 0x52, read 3) each.
