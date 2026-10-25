@@ -184,6 +184,8 @@ smp_entry:
         ldr     x6, smp_mbox
         add     x6, x6, x4, lsl #4          // our 16-byte slot
         str     x1, [x6]
+        mrs     x1, mpidr_el1
+        str     w1, [x6, #4]                // raw MPIDR_EL1 (low 32 bits)
         dsb     sy
         // bar: rows 2300 + slot*80, 40 rows, full width (below the text)
         ldr     x7, smp_fb
@@ -214,16 +216,16 @@ smp_entry:
         ldr     w1, [x14, x4, lsl #2]
         cbz     w1, 9f
         movz    w15, #0xca11
-        str     w15, [x6, #4]
+        str     w15, [x6, #8]
         dsb     sy
         movz    x0, #0x0003
         movk    x0, #0xc400, lsl #16
         adr     x2, smp_entry
         mov     x3, #0
         smc     #0
-        str     w0, [x6, #8]
-        movz    w15, #0xd0e
-        str     w15, [x6, #4]
+        movz    w15, #0xd0e, lsl #16
+        orr     w15, w15, w0                // 0x0d0e_rc: chain CPU_ON returned
+        str     w15, [x6, #8]
         dsb     sy
         // alive loop: counter in word 3, white block walking along the bar
 9:      mov     x15, #0
