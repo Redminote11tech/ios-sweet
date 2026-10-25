@@ -550,6 +550,9 @@ static void boot_xnu(void)
 #define TB_HZ 26000000UL                // CNTFRQ_EL0 reads 0 on the S9
 
 static inline u32 rd32(u64 a) { return *(volatile u32 *)a; }
+extern u32 safe_rd32(u64 a);
+extern void safe_wr32(u64 a, u32 v);
+extern volatile u32 safe_faults;
 static inline void wr32(u64 a, u32 v) { *(volatile u32 *)a = v; }
 #define WSR(name, v) __asm__ volatile("msr " #name ", %0" : : "r"((u64)(v)))
 
@@ -1378,18 +1381,33 @@ static void input_test(void)
     // exynos_arm64_init_clocks + clk_enable: manual mode, clock on, for every
     // gate-shaped register (only bits 20/21/28/29 in use).
     color(HEAD);
-    puts_("CMU_PERIC0 0x10400000\n");
+    puts_("CMU_PERIC0 0x10400000 (safe reads)\n");
     {
         const u64 cmu = 0x10400000UL;
-        kvh("  +0100 ", rd32(cmu + 0x100), "  +0140 ", rd32(cmu + 0x140));
-        u32 n = 0, on = 0, col = 0;
+        // map: which 0x100-byte pages answer, and which word offsets in
+        // 0x2000..0x21fc are gate-shaped (bits 20/21/28/29 only)
+        color(DIM);
+        puts_("  pages ");
+        color(FG);
+        for (u32 pg = 0; pg < 0x40; pg++) {
+            safe_faults = 0;
+            (void)safe_rd32(cmu + pg * 0x100);
+            putch(safe_faults ? '.' : '#');
+        }
+        putch('\n');
+        u32 n = 0, on = 0, miss = 0, col = 0;
         for (u32 o = 0x2000; o < 0x2200; o += 4) {
-            u32 v = rd32(cmu + o);
+            safe_faults = 0;
+            u32 v = safe_rd32(cmu + o);
+            if (safe_faults) {
+                miss++;
+                continue;
+            }
             if (v & ~0x30300000u)
-                continue;               // not a gate
+                continue;
             n++;
             if (!(v & (1u << 21)) || (v & (1u << 28))) {
-                if (col < 12) {          // first changed ones: offset:old
+                if (col < 16) {
                     color(DIM);
                     hex(o & 0xfff, 3);
                     putch(':');
@@ -1399,26 +1417,13 @@ static void input_test(void)
                     if (++col % 4 == 0)
                         putch('\n');
                 }
-                wr32(cmu + o, (v & ~(1u << 28)) | 1u << 20 | 1u << 21);
+                safe_wr32(cmu + o, (v & ~(1u << 28)) | 1u << 20 | 1u << 21);
                 on++;
             }
         }
         putch('\n');
         kvh("  gates ", n, "  switched on ", on);
-        // user muxes (PLL_CON0 .._USER at 0x100 + 0x20 * i): bit 4 = not oscclk
-        color(DIM);
-        puts_("  mux ");
-        color(FG);
-        for (u32 o = 0x100; o < 0x300; o += 0x20) {
-            u32 v = rd32(cmu + o);
-            if (v) {
-                hex(o, 3);
-                putch(':');
-                hex(v, 1);
-                putch(' ');
-            }
-        }
-        putch('\n');
+        kvh("  missing ", miss, "", 0);
     }
     // USI v2 wrapper (+0xc4 USI_CON bit0 = reset, +0xc8 USI_OPTION):
     // release the reset, clock request on, clock stop off (Linux exynos-usi).

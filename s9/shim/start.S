@@ -90,13 +90,31 @@ park:
         b       irq_common
         .endm
 
+        // Current EL, SPx, synchronous: a fault on the load/store inside
+        // safe_rd32/safe_wr32 (probing registers that may not exist) returns
+        // to the failure path instead of stopping the shim.
+        .macro vecsafe
+        .balign 0x80
+        mrs     x9, elr_el1
+        adr     x10, safe_ld
+        cmp     x9, x10
+        b.eq    1f
+        adr     x10, safe_st
+        cmp     x9, x10
+        b.eq    1f
+        b       vec4_fatal
+1:      adr     x9, safe_fail
+        msr     elr_el1, x9
+        eret
+        .endm
+
         .balign 2048
 vectors:
         vec 0
         irqvec
         vec 2
         vec 3
-        vec 4
+        vecsafe
         irqvec
         vec 6
         vec 7
@@ -108,6 +126,38 @@ vectors:
         vec 13
         vec 14
         vec 15
+
+vec4_fatal:
+        adr     x9, exc_stack_top
+        mov     sp, x9
+        mov     x0, #4
+        mrs     x1, esr_el1
+        mrs     x2, elr_el1
+        mrs     x3, far_el1
+        mrs     x4, spsr_el1
+        bl      shim_exception
+        b       park
+
+// u32 safe_rd32(u64 addr): 0xDEADBEEF and safe_faults++ if the read aborts
+        .globl safe_rd32
+safe_rd32:
+safe_ld:
+        ldr     w0, [x0]
+        ret
+// void safe_wr32(u64 addr, u32 v)
+        .globl safe_wr32
+safe_wr32:
+safe_st:
+        str     w1, [x0]
+        ret
+safe_fail:
+        adr     x9, safe_faults
+        ldr     w10, [x9]
+        add     w10, w10, #1
+        str     w10, [x9]
+        movz    w0, #0xbeef
+        movk    w0, #0xdead, lsl #16
+        ret
 
 irq_common:
         sub     sp, sp, #(24 * 8)
@@ -146,6 +196,10 @@ irq_common:
         // Stacks live in .data (zeros stored in the file) rather than .bss, so they are
         // part of what S-Boot loads and can't overlap whatever it put right after us.
         .section .data.stacks, "aw"
+        .balign 4
+        .globl safe_faults
+safe_faults:
+        .word   0
         .balign 16
         .space  64 * 1024
 stack_top:
