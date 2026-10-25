@@ -34,6 +34,11 @@ link() {   # link OUT PAYLOAD_OBJ
 clang $CFLAGS -c payload.S -o out/nopayload.o
 link t2-Image out/nopayload.o
 
+# t4: GIC-400 / architected timer interrupt test
+clang $CFLAGS -DGICTEST -c main.c -o out/main.o
+link t4-Image out/nopayload.o
+clang $CFLAGS -c main.c -o out/main.o
+
 if [ -n "$PAYLOAD" ]; then
     clang $CFLAGS -DPAYLOAD="\"$PAYLOAD\"" -c payload.S -o out/payload.o
     link xnu-Image out/payload.o

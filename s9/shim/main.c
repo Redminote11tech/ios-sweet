@@ -540,6 +540,163 @@ static void boot_xnu(void)
     puts_("  XNU returned\n");
 }
 
+
+#ifndef HOST
+// ---------------------------------------------------------------- GIC/timer test (t4)
+// Which interrupts does the S9 actually deliver to non-secure EL1?
+// GIC-400 through its memory-mapped registers (no GIC sysregs on this CPU).
+#define GICD 0x10101000UL
+#define GICC 0x10102000UL
+#define TB_HZ 26000000UL                // CNTFRQ_EL0 reads 0 on the S9
+
+static inline u32 rd32(u64 a) { return *(volatile u32 *)a; }
+static inline void wr32(u64 a, u32 v) { *(volatile u32 *)a = v; }
+#define WSR(name, v) __asm__ volatile("msr " #name ", %0" : : "r"((u64)(v)))
+
+static volatile u32 irq_count[64], irq_spurious, irq_last = 0x3ff, irq_total;
+
+void shim_irq(void)
+{
+    u32 iar = rd32(GICC + 0x0C);
+    u32 id = iar & 0x3ff;
+    irq_total++;
+    if (id >= 1020) {
+        irq_spurious++;
+        return;
+    }
+    irq_last = id;
+    if (id < 64)
+        irq_count[id]++;
+    if (id == 27)
+        WSR(cntv_tval_el0, TB_HZ / 100);       // re-arm 10 ms
+    else if (id == 30)
+        WSR(cntp_tval_el0, TB_HZ / 100);
+    else if (id == 26)
+        WSR(cntv_ctl_el0, 0);
+    wr32(GICC + 0x10, iar);
+    __asm__ volatile("dsb sy; isb" ::: "memory");
+}
+
+static u64 now(void)
+{
+    __asm__ volatile("isb");
+    return SYSREG(cntpct_el0);
+}
+
+static void wait_ticks(u64 t)
+{
+    u64 end = now() + t;
+    while (now() < end)
+        ;
+}
+
+static void kvh(const char *k, u64 a, const char *k2, u64 b)
+{
+    color(DIM);
+    puts_(k);
+    color(FG);
+    hexv(a);
+    color(DIM);
+    puts_(k2);
+    color(FG);
+    hexv(b);
+    putch('\n');
+}
+
+static void irq_window(const char *label, int src)
+{
+    for (int i = 0; i < 64; i++)
+        irq_count[i] = 0;
+    irq_spurious = 0;
+    irq_total = 0;
+    irq_last = 0x3ff;
+
+    if (src == 27) {
+        WSR(cntv_tval_el0, TB_HZ / 100);
+        WSR(cntv_ctl_el0, 1);
+    } else if (src == 30) {
+        WSR(cntp_tval_el0, TB_HZ / 100);
+        WSR(cntp_ctl_el0, 1);
+    }
+    __asm__ volatile("isb");
+    wait_ticks(TB_HZ / 50);                 // 20 ms masked: timer must be pending now
+    if (src == 1)
+        wr32(GICD + 0xF00, ((rd32(GICD + 0x800) & 0xff) << 16) | 1);
+    __asm__ volatile("dsb sy; isb");
+    u64 ctl = src == 30 ? SYSREG(cntp_ctl_el0) : SYSREG(cntv_ctl_el0);
+    u32 pend = rd32(GICD + 0x200);
+    u32 hppir = rd32(GICC + 0x18);
+    u64 isr = SYSREG(isr_el1);
+
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
+    u64 end = now() + TB_HZ * 3 / 10;
+    u64 next = now() + TB_HZ / 100;
+    for (int sent = 1; now() < end;)
+        if (src == 1 && sent < 10 && now() >= next) {
+            wr32(GICD + 0xF00, ((rd32(GICD + 0x800) & 0xff) << 16) | 1);
+            sent++;
+            next += TB_HZ / 100;
+        }
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+    WSR(cntv_ctl_el0, 0);
+    WSR(cntp_ctl_el0, 0);
+    __asm__ volatile("isb");
+
+    color(HEAD);
+    puts_(label);
+    putch('\n');
+    color(DIM);
+    puts_("  got ");
+    color(irq_count[src] ? OK : BAD);
+    dec(irq_count[src]);
+    color(DIM);
+    puts_(src == 1 ? " of 10" : " (want ~30)");
+    puts_("  total ");
+    color(FG);
+    dec(irq_total);
+    color(DIM);
+    puts_(" spur ");
+    color(FG);
+    dec(irq_spurious);
+    putch('\n');
+    kvh("  pre: ctl ", ctl, "  pend ", pend);
+    kvh("  pre: hppir ", hppir, "  isr ", isr);
+    kvh("  last id ", irq_last, "", 0);
+}
+
+static void __attribute__((unused)) gic_test(void)
+{
+    color(HEAD);
+    puts_("GIC-400 / timer test\n");
+    kvh("  GICD ctlr ", rd32(GICD + 0x000), "  typer ", rd32(GICD + 0x004));
+    kvh("  GICD iidr ", rd32(GICD + 0x008), "  itargets0 ", rd32(GICD + 0x800));
+    kvh("  GICC ctlr ", rd32(GICC + 0x00), "  iidr ", rd32(GICC + 0xFC));
+    kvh("  ISENABLER0 ", rd32(GICD + 0x100), "  ICFGR1 ", rd32(GICD + 0xC04));
+    kvh("  CNTV-CNTP ", SYSREG(cntvct_el0) - SYSREG(cntpct_el0), "  cntkctl ", SYSREG(cntkctl_el1));
+
+    // Same setup as the kernel (patch 0082), plus the physical timer.
+    u32 want = (1U << 27) | (1U << 30) | (1U << 1);
+    wr32(GICD + 0x180, ~want);
+    wr32(GICD + 0x080, 0xFFFFFFFF);
+    for (int i = 0; i < 32; i += 4)
+        wr32(GICD + 0x400 + i, 0xA0A0A0A0);
+    wr32(GICD + 0x100, want);
+    wr32(GICC + 0x04, 0xF0);
+    wr32(GICC + 0x08, 0);
+    wr32(GICC + 0x00, 1);
+    wr32(GICD + 0x000, rd32(GICD + 0x000) | 1);
+    __asm__ volatile("dsb sy; isb");
+    kvh("  after: GICD ctlr ", rd32(GICD), "  GICC ctlr ", rd32(GICC));
+    kvh("  after: ISENABLER0 ", rd32(GICD + 0x100), "  pmr ", rd32(GICC + 0x04));
+
+    irq_window("Virtual timer (INTID 27)", 27);
+    irq_window("Physical timer (INTID 30)", 30);
+    irq_window("SGI 1 to self", 1);
+}
+#else
+void shim_irq(void) {}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -620,6 +777,12 @@ void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
     kv("  CTR         ", SYSREG(ctr_el0));
     kv("  CNTFRQ      ", SYSREG(cntfrq_el0));
 
+#ifdef GICTEST
+    gic_test();
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+#endif
     // A linked-in XNU payload means: boot it. Returns only if it can't.
     boot_xnu();
 #ifdef HOST
