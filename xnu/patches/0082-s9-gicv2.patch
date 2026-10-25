@@ -1,0 +1,299 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -20,6 +20,7 @@
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
++extern "C" void sweet_gic_send_sgi(unsigned int cpu, uint64_t mpidr, unsigned int id);
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -216,17 +217,8 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	}
+ 	/* Use the TARGET affinity, including Aff1, never the sender's MPIDR. */
+ 	uint64_t mpidr = topology->cpus[logical].phys_id;
+-	unsigned int aff0 = mpidr & 0xff;
+-	if (aff0 >= 16) {
+-		panic("SWEET CPU: SGI target requires unsupported range selector");
+-	}
+-	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
+-	    (((mpidr >> 16) & 0xff) << 32) |
+-	    (((mpidr >> 8) & 0xff) << 16) |
+-	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
+-	__builtin_arm_dsb(DSB_ISHST);
+-	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+-	__builtin_arm_isb(ISB_SY);
++	/* GICv3 ICC_SGI1R_EL1 or GICv2 GICD_SGIR (pe_fiq.c). */
++	sweet_gic_send_sgi(logical, mpidr, SWEET_IPI_SGI);
+ }
+ 
+ kern_return_t
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1859,10 +1859,12 @@ sleh_irq(arm_saved_state_t *state)
+ #if defined(SWEET)
+ 	/*
+ 	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+-	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
++	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs. The GIC
++	 * helpers (pe_fiq.c) use the GICv3 system registers or, on GICv2
++	 * (Galaxy S9), the memory-mapped CPU interface.
+ 	 */
+-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+-	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++	uint64_t iar = sweet_gic_ack();
++	uint32_t intid = sweet_gic_intid(iar);
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */
+@@ -1873,11 +1875,11 @@ sleh_irq(arm_saved_state_t *state)
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1888,7 +1890,7 @@ sleh_irq(arm_saved_state_t *state)
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
+ #else
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include <stdint.h>
++#include <string.h>
+ #include <libkern/section_keywords.h>
+ #include <arm64/proc_reg.h>
+ #include <kern/clock.h>
+@@ -20,6 +21,34 @@ MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS,
+ #if defined(SWEET)
+ /* Phone default; QEMU virt wires the architected virtual timer to INTID 27. */
+ SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
++
++/*
++ * GICv2 (GIC-400, e.g. Exynos 9810 / Galaxy S9). Selected at boot from the
++ * ADT: /arm-io/gic compatible "arm,gic-400" or "arm,cortex-a15-gic", with
++ * reg = <GICD base, size, GICC base, size>. These CPUs implement no GIC
++ * system registers (ID_AA64PFR0_EL1.GIC == 0): every ICC_* access would be
++ * UNDEFINED, so the CPU interface is driven through the memory-mapped GICC.
++ * Non-secure software only sees Group 1, which the GIC signals as IRQ, so the
++ * timer and IPIs take the same sleh_irq() path as on sweet.
++ */
++SECURITY_READ_ONLY_LATE(bool) sweet_gic_v2 = false;
++static vm_offset_t gicc_base;
++/* GICD_ITARGETSR0 byte of each logical CPU: its GICv2 CPU interface mask. */
++static uint8_t sweet_gic_v2_cpumask[SWEET_SMP_MAX_CPUS];
++
++#define GICV2_GICD_CTLR         0x000
++#define GICV2_GICD_IGROUPR0     0x080
++#define GICV2_GICD_ISENABLER0   0x100
++#define GICV2_GICD_ICENABLER0   0x180
++#define GICV2_GICD_IPRIORITYR0  0x400
++#define GICV2_GICD_ITARGETSR0   0x800
++#define GICV2_GICD_SGIR         0xF00
++#define GICV2_GICC_CTLR         0x00
++#define GICV2_GICC_PMR          0x04
++#define GICV2_GICC_BPR          0x08
++#define GICV2_GICC_IAR          0x0C
++#define GICV2_GICC_EOIR         0x10
++#define GICV2_INTID_MASK        0x3FF
+ #endif
+ 
+ static vm_offset_t gicd_base;
+@@ -73,6 +102,104 @@ find_gicr_pe_base()
+ 	panic("%s: cannot find GICR base for core %u", __func__, ml_get_cpu_number(phys_id));
+ }
+ 
++#if defined(SWEET)
++#define gicc_read32(offset) (_gic_read32(gicc_base + (offset)))
++#define gicc_write32(offset, data) (_gic_write32(gicc_base + (offset), (data)))
++
++/* Per-CPU GICv2 setup: banked SGI/PPI registers in GICD plus this CPU's GICC. */
++static void
++sweet_gic_v2_init_cpu(void)
++{
++	unsigned int cpu = ml_get_cpu_number_local();
++	uint32_t want = (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI);
++
++	/* Only our two banked interrupts: S-Boot may have left others enabled. */
++	gicd_write32(GICV2_GICD_ICENABLER0, ~want);
++	/* Non-secure view: RAZ/WI, everything we can see is Group 1 already. */
++	gicd_write32(GICV2_GICD_IGROUPR0, 0xFFFFFFFF);
++	for (unsigned int i = 0; i < 32; i += 4) {
++		gicd_write32(GICV2_GICD_IPRIORITYR0 + i, 0xA0A0A0A0);
++	}
++
++	/* ITARGETSR0..7 are read-only and banked: they name this CPU interface. */
++	uint32_t targets = gicd_read32(GICV2_GICD_ITARGETSR0);
++	uint8_t mask = (uint8_t)(targets & 0xFF);
++	if (mask == 0) {
++		panic("SWEET GIC: GICv2 CPU interface mask is 0 on cpu %u", cpu);
++	}
++	if (cpu < SWEET_SMP_MAX_CPUS) {
++		sweet_gic_v2_cpumask[cpu] = mask;
++	}
++
++	gicd_write32(GICV2_GICD_ISENABLER0, want);
++
++	gicc_write32(GICV2_GICC_PMR, 0xF0);
++	gicc_write32(GICV2_GICC_BPR, 0);
++	/* Non-secure GICC_CTLR: bit 0 EnableGrp1, EOImodeNS (bit 9) = 0. */
++	gicc_write32(GICV2_GICC_CTLR, 1);
++
++	/* Non-secure GICD_CTLR: bit 0 enables Group 1 forwarding. */
++	gicd_write32(GICV2_GICD_CTLR, gicd_read32(GICV2_GICD_CTLR) | 1);
++	__builtin_arm_dsb(DSB_SY);
++	__builtin_arm_isb(ISB_SY);
++
++	kprintf("SWEET GIC: cpu %u GICv2 mask 0x%x timer INTID %u enabled 0x%x\n",
++	    cpu, mask, sweet_vtimer_intid, gicd_read32(GICV2_GICD_ISENABLER0));
++}
++
++uint64_t
++sweet_gic_ack(void)
++{
++	if (sweet_gic_v2) {
++		return gicc_read32(GICV2_GICC_IAR);
++	}
++	return __builtin_arm_rsr64("ICC_IAR1_EL1");
++}
++
++uint32_t
++sweet_gic_intid(uint64_t iar)
++{
++	return (uint32_t)(iar & (sweet_gic_v2 ? GICV2_INTID_MASK : 0xFFFFFF));
++}
++
++void
++sweet_gic_eoi(uint64_t iar)
++{
++	if (sweet_gic_v2) {
++		gicc_write32(GICV2_GICC_EOIR, (uint32_t)iar);
++	} else {
++		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++	}
++}
++
++/* Send SGI `id` to logical CPU `cpu` whose MPIDR is `mpidr`. */
++void
++sweet_gic_send_sgi(unsigned int cpu, uint64_t mpidr, unsigned int id)
++{
++	__builtin_arm_dsb(DSB_ISHST);
++	if (sweet_gic_v2) {
++		uint8_t mask = cpu < SWEET_SMP_MAX_CPUS ? sweet_gic_v2_cpumask[cpu] : 0;
++		if (mask == 0) {
++			panic("SWEET GIC: no GICv2 CPU interface for cpu %u", cpu);
++		}
++		/* TargetListFilter 0: the CPUs in the target list. */
++		gicd_write32(GICV2_GICD_SGIR, ((uint32_t)mask << 16) | (id & 0xF));
++		__builtin_arm_dsb(DSB_SY);
++		return;
++	}
++	unsigned int aff0 = mpidr & 0xff;
++	if (aff0 >= 16) {
++		panic("SWEET GIC: SGI target requires unsupported range selector");
++	}
++	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
++	    (((mpidr >> 16) & 0xff) << 32) |
++	    (((mpidr >> 8) & 0xff) << 16) |
++	    ((uint64_t)id << 24) | (1ULL << aff0);
++	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
++	__builtin_arm_isb(ISB_SY);
++}
++#endif /* SWEET */
++
+ void
+ pe_init_fiq()
+ {
+@@ -104,6 +231,30 @@ pe_init_fiq()
+ 
+ #if defined(SWEET)
+ 		/* Read only on the boot CPU, before the GIC and RO-late lockdown. */
++		void const *compat_prop;
++		unsigned int compat_size;
++		if (SecureDTGetProperty(entry, "compatible", &compat_prop, &compat_size) == kSuccess) {
++			/* NUL-separated string list; compare each entry. */
++			const char *c = (const char *)compat_prop;
++			unsigned int left = compat_size;
++			while (left > 0 && *c) {
++				unsigned int n = 0;
++				while (n < left && c[n]) {
++					n++;
++				}
++				if ((n == 11 && memcmp(c, "arm,gic-400", 11) == 0) ||
++				    (n == 18 && memcmp(c, "arm,cortex-a15-gic", 18) == 0)) {
++					sweet_gic_v2 = true;
++				}
++				if (n + 1 >= left) {
++					break;
++				}
++				c += n + 1;
++				left -= n + 1;
++			}
++		}
++		kprintf("SWEET GIC: %s\n", sweet_gic_v2 ? "GICv2 (memory-mapped CPU interface)" : "GICv3");
++
+ 		void const *timer_prop;
+ 		unsigned int timer_size;
+ 		if (SecureDTGetProperty(entry, "virtual-timer-intid", &timer_prop, &timer_size) == kSuccess) {
+@@ -133,16 +284,30 @@ pe_init_fiq()
+ 			panic("%s: cannot map GICD region", __func__);
+ 		}
+ 
++#if defined(SWEET)
++		if (sweet_gic_v2) {
++			gicc_base = ml_io_map(soc_base_phys + gicr_base_prop, gicr_size_prop);
++			if (!gicc_base) {
++				panic("%s: cannot map GICC region", __func__);
++			}
++		}
++#endif
+ 		// Find GICR base address
+-		gicr_base = ml_io_map(soc_base_phys + gicr_base_prop, gicr_size_prop);
++		gicr_base = sweet_gic_v2 ? 0 : ml_io_map(soc_base_phys + gicr_base_prop, gicr_size_prop);
+ 
+-		if (!gicr_base) {
++		if (!gicr_base && !sweet_gic_v2) {
+ 			panic("%s: cannot map GICR region", __func__);
+ 		}
+ 
+ 		gicr_size = gicr_size_prop;
+ 	}
+ 
++#if defined(SWEET)
++	if (sweet_gic_v2) {
++		sweet_gic_v2_init_cpu();
++		return;
++	}
++#endif
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+ 
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -38,6 +38,11 @@ int uart_getc(void);
+ void pe_init_fiq(void);
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern uint32_t sweet_vtimer_intid;
++extern bool sweet_gic_v2;
++uint64_t sweet_gic_ack(void);
++uint32_t sweet_gic_intid(uint64_t iar);
++void sweet_gic_eoi(uint64_t iar);
++void sweet_gic_send_sgi(unsigned int cpu, uint64_t mpidr, unsigned int id);
+ #endif
+ 
+ #ifdef PRIVATE
