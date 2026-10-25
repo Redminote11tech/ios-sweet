@@ -19,14 +19,14 @@ on:
         default: ""
       cmdline:
         description: XNU boot-args
-        default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
+        default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress startup_debug=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
 
 permissions:
   contents: write
   actions: read
 
 env:
-  CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
+  CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress startup_debug=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
 
 jobs:
   package:
