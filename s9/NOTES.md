@@ -4,6 +4,9 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **PHASE 3 COMPLETE (observed, 10:41 local):** with `qcom,kryo470` in the CPU compatibles, `SweetCPU: 1/1 CPUs initialized, SGI1 verified`, IORTC 30 s wait completes, calendar initialized, all of bsd_init runs (vfs, AMFI + Sandbox policies, HFS, mbuf, skywalk self-tests PASSED, loopback), then `Waiting on <dict ... IOMedia ... Apple_HFS>`. `Failed to write boot-picker-bringup-reason to NVRAM` is harmless.
+- Next image: RAM-disk root (`rd=md0`, mockfs serves tools/sweet-init as /sbin/launchd), s9-image default from now on. xnu-Image 16736256 bytes.
+
 - **Boot hang found (observed with `io=0xc startup_debug=1`, xnu run `40180209939`):** last bootstrap stage `PE_lockdown_iokit`; bsd_init never starts. Timer IRQs arrive (`SWEET IRQ: timer #1`..`#4096`). The CPU nubs `cpu0@0`..`cpu7@103` register but no driver starts on them: SweetCPU matches `IONameMatch 'qcom,kryo470'` only. Fix: the S9 ADT lists `qcom,kryo470` in each CPU's compatible.
 - **t4 shim test (observed):** GIC-400 delivers virtual timer (30/30), physical timer (30/30) and SGI 1 (10/10) to EL1 with the kernel's GICv2 setup. GICD typer `0xfcef`, iidr `0x200143b`, GICC iidr `0x202143b`, itargets0 `0x01010101`. Stopwatch: shim counter 60 s = 60.46 s real, so 26 MHz is right.
 
