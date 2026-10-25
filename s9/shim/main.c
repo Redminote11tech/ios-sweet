@@ -1173,6 +1173,12 @@ static void __attribute__((unused)) ufs_probe(void)
 #define USI_SWCONF 0x10411000UL
 
 static u32 bank_dat(u64 base, u32 bank) { return rd32(base + bank * 0x20 + 4); }
+// Probe #4: the alive banks are one slot further than assumed: gpa0 at +0x20
+// (DAT 0x5e: vol+/vol-/bixby high = released), gpa1 at +0x40, gpa2 at +0x60
+// (power gpa2-4 went 0x14 -> 0x04 on a press).
+#define GPA0 1
+#define GPA1 2
+#define GPA2 3
 
 static void i2c_dump(void)
 {
@@ -1294,25 +1300,22 @@ static void input_test(void)
     puts_("Press vol+ vol- bixby power, touch the screen (20 s)\n");
     int row = cur_y;
     u32 cnt[5] = { 0 }, last[5], v[5];
-    for (int k = 0; k < 2; k++) {
-        u32 a0 = bank_dat(PIN_ALIVE, 0), a1 = bank_dat(PIN_ALIVE, 1), a2 = bank_dat(PIN_ALIVE, 2);
-        v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
-        v[3] = (a2 >> 4) & 1; v[4] = a1 & 1;
-        for (int i = 0; i < 5; i++)
-            last[i] = v[i];
-    }
+    u32 prev[6], ev = 0;
+    for (u32 b = 0; b < 6; b++)
+        prev[b] = bank_dat(PIN_ALIVE, b);
+    for (int i = 0; i < 5; i++)
+        last[i] = 2;
     u64 end = now() + 20 * TB_HZ;
     while (now() < end) {
-        u32 a0 = bank_dat(PIN_ALIVE, 0), a1 = bank_dat(PIN_ALIVE, 1), a2 = bank_dat(PIN_ALIVE, 2);
+        u32 a0 = bank_dat(PIN_ALIVE, GPA0), a1 = bank_dat(PIN_ALIVE, GPA1), a2 = bank_dat(PIN_ALIVE, GPA2);
         v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
         v[3] = (a2 >> 4) & 1; v[4] = a1 & 1;
         cur_y = row;
         cur_x = 0;
         for (int i = 0; i < 5; i++) {
-            if (v[i] != last[i]) {
+            if (last[i] != 2 && v[i] != last[i])
                 cnt[i]++;
-                last[i] = v[i];
-            }
+            last[i] = v[i];
             color(v[i] ? DIM : OK);
             // no table of string pointers: the shim runs where S-Boot put it,
             // and initialised pointers hold link-time (0-based) addresses
@@ -1327,21 +1330,30 @@ static void input_test(void)
             dec(v[i]);
             putch('/');
             dec(cnt[i]);
-            puts_("  ");
+            puts_(" ");
         }
-        // raw data registers of the first alive banks, to spot keys elsewhere
-        cur_y = row + 1;
-        cur_x = 0;
-        color(DIM);
-        puts_("raw ");
-        color(FG);
+        // every bit change in alive banks 0..5, in order (first 24): bank.bit=new
         for (u32 b = 0; b < 6; b++) {
-            hex(bank_dat(PIN_ALIVE, b), 2);
-            putch(' ');
+            u32 d = bank_dat(PIN_ALIVE, b), x = d ^ prev[b];
+            for (u32 bit = 0; bit < 8 && x; bit++)
+                if (x & (1u << bit)) {
+                    if (ev < 24) {
+                        cur_y = row + 1 + ev / 6;
+                        cur_x = (ev % 6) * 7;
+                        color(FG);
+                        dec(b);
+                        putch('.');
+                        dec(bit);
+                        putch('=');
+                        dec((d >> bit) & 1);
+                    }
+                    ev++;
+                }
+            prev[b] = d;
         }
         wait_ticks(TB_HZ / 50);
     }
-    cur_y = row + 2;
+    cur_y = row + 5;
     cur_x = 0;
     putch('\n');
 
@@ -1359,6 +1371,12 @@ static void input_test(void)
     con = (con & ~(0xffu << 16)) | (0x22u << 16);
     wr32(PIN_PERIC0 + 0x20, con);
     kvh("  gpp1 con ", rd32(PIN_PERIC0 + 0x20), "  dat ", bank_dat(PIN_PERIC0, 1));
+    // USI v2 wrapper (+0xc4 USI_CON bit0 = reset, +0xc8 USI_OPTION):
+    // release the reset, clock request on, clock stop off (Linux exynos-usi).
+    wr32(HSI2C10 + 0xc8, (rd32(HSI2C10 + 0xc8) & ~(1u << 2)) | (1u << 1));
+    wr32(HSI2C10 + 0xc4, rd32(HSI2C10 + 0xc4) & ~1u);
+    wait_ticks(TB_HZ / 1000);
+    kvh("  usi con ", rd32(HSI2C10 + 0xc4), "  option ", rd32(HSI2C10 + 0xc8));
     hs_init();
     i2c_dump();
     u8 cmd = 0x52, id[3] = { 0 };
