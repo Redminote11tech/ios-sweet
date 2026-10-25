@@ -29,6 +29,7 @@ permissions:
   actions: read
 
 env:
+  IPSW_URL: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
   CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
 
 jobs:
@@ -58,6 +59,17 @@ jobs:
 
       - name: Tools
         run: sudo apt-get install -y -q clang lld llvm
+
+      # /product of the real iPhone X device tree (MobileGestalt needs it), read
+      # from Apple's IPSW with range requests at build time; never committed.
+      - name: iPhone X device tree
+        continue-on-error: true
+        run: |
+          pip install -q pyimg4
+          python3 tools/remotezip.py "$IPSW_URL" DeviceTree.d22ap.im4p research/ipsw-x/dt
+          f=$(find research/ipsw-x/dt -name DeviceTree.d22ap.im4p | head -1)
+          pyimg4 im4p extract -i "$f" -o research/ipsw-x/d22ap.adt
+          ls -la research/ipsw-x/d22ap.adt
 
       - name: Build
         run: |
