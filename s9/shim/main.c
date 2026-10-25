@@ -716,18 +716,23 @@ struct utrd {
     u32 dw0, dw1, dw2, dw3, ucdba, ucdbau, resp, prdt;
 };
 
-// Command UPIU, response UPIU, then a PRDT big enough for one 128-byte
-// (Samsung FMP) entry; a standard entry uses the first 16 bytes of it.
+// Command UPIU area, response UPIU area (1 KiB each, like S-Boot), PRDT
+// (8 entries of 16 bytes = 32 KiB in 4 KiB pieces).
 struct ucd {
-    u8 cmd[512];
-    u8 resp[512];
+    u8 cmd[1024];
+    u8 resp[1024];
     u32 prdt[32];
 };
 
-static struct utrd utrl[32] __attribute__((aligned(1024)));
-static struct ucd ucd_buf __attribute__((aligned(128)));
-static u8 ufs_data[2 * UFS_BLOCK] __attribute__((aligned(4096)));
-static u8 gpt_ents[128 * 128] __attribute__((aligned(4096)));
+// Probe #1 got OCS 0x07 (fatal error) with its buffers in the shim image
+// (0x80xxxxxx). Keep everything the controller DMAs next to S-Boot's own
+// request list (0xef000000-0xef002fff, free RAM: not in reserved-memory).
+#define UFS_DMA 0xef100000UL
+static struct utrd *const utrl = (struct utrd *)UFS_DMA;               // 32 x 32 B
+#define ucd_buf (*(struct ucd *)(UFS_DMA + 0x1000))
+static u8 *const ufs_data = (u8 *)(UFS_DMA + 0x10000);                 // 8 KiB
+static u8 *const gpt_ents = (u8 *)(UFS_DMA + 0x20000);                 // 16 KiB
+static u32 ufs_ct;                          // UTRD command type, copied from S-Boot
 static int ufs_bytes;                       // offsets/lengths in bytes (Exynos quirk), else DWORDs
 static u32 ufs_prdt_max = 4096;             // bytes per PRDT entry (Exynos HCI_TXPRDT_ENTRY_SIZE)
 
@@ -746,7 +751,7 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
 {
     static u8 tag;
     zero(&utrl[0], sizeof(utrl[0]));
-    zero(&ucd_buf, sizeof(ucd_buf));
+    zero(&ucd_buf, sizeof(struct ucd));
     ucd_buf.cmd[0] = 0x01;                  // COMMAND UPIU
     ucd_buf.cmd[1] = len ? 0x40 : 0x00;     // R
     ucd_buf.cmd[2] = 0;                     // LUN 0
@@ -760,11 +765,11 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
 
     u64 ucd_pa = (u64)&ucd_buf;
     u32 unit = ufs_bytes ? 1 : 4;
-    utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);
+    utrl[0].dw0 = (ufs_ct << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);
     utrl[0].dw2 = 0x0f;
     utrl[0].ucdba = (u32)ucd_pa;
     utrl[0].ucdbau = (u32)(ucd_pa >> 32);
-    utrl[0].resp = (512u / unit) << 16 | (512u / unit);
+    utrl[0].resp = (1024u / unit) << 16 | (1024u / unit);
     if (len) {
         // Exynos: one PRDT entry covers at most 2^txprdt bytes (4 KiB here).
         u32 chunk = ufs_prdt_max, n = (len + chunk - 1) / chunk;
@@ -777,7 +782,7 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
             ucd_buf.prdt[4 * i + 1] = (u32)((b + i * chunk) >> 32);
             ucd_buf.prdt[4 * i + 3] = piece - 1;
         }
-        utrl[0].prdt = (1024u / unit) << 16 | (ufs_bytes ? n * 16 : n);
+        utrl[0].prdt = (2048u / unit) << 16 | (ufs_bytes ? n * 16 : n);
     }
     __asm__ volatile("dsb sy" ::: "memory");
     ufs_wr(0x58, 1);                        // UTRLDBR slot 0
@@ -841,8 +846,10 @@ static void __attribute__((unused)) ufs_probe(void)
                 "  cdb ", (u32)c[16] << 24 | c[17] << 16 | c[18] << 8 | c[19]);
         }
     }
-    // Byte granularity if S-Boot's response offset is 512 (bytes) rather than 128 (DWORDs).
+    // Byte granularity if S-Boot's response offset is 512+ (bytes) rather than 128 (DWORDs).
     ufs_bytes = (sb_resp >> 16) >= 512;
+    if (sb_list && sb_list < 0x100000000UL)
+        ufs_ct = ((const volatile struct utrd *)sb_list)->dw0 >> 28;
     u32 ent = vs_rd(0x00) & 0x1f;           // log2 of the bytes one PRDT entry may cover
     if (ent >= 9 && ent <= 17)
         ufs_prdt_max = 1u << ent;
@@ -852,7 +859,10 @@ static void __attribute__((unused)) ufs_probe(void)
     puts_(ufs_bytes ? "bytes" : "dwords");
     puts_(", max per PRDT entry ");
     dec(ufs_prdt_max);
+    puts_(", CT ");
+    dec(ufs_ct);
     putch('\n');
+    kvh("  our list ", UFS_DMA, "  ucd ", UFS_DMA + 0x1000);
 
     // Exynos HCE reads 0 even while running (Linux: UFSHCI_QUIRK_BROKEN_HCE),
     // so only require device present + transfer list ready in HCS.
@@ -870,6 +880,7 @@ static void __attribute__((unused)) ufs_probe(void)
     // Take over the transfer request list; never ring a doorbell unless the
     // host really uses ours (else it would run S-Boot's slot 0 again).
     ufs_wr(0x60, 0);
+    zero((void *)UFS_DMA, 0x30000);
     u64 list = (u64)utrl;
     ufs_wr(0x50, (u32)list);
     ufs_wr(0x54, (u32)(list >> 32));
@@ -894,6 +905,8 @@ static void __attribute__((unused)) ufs_probe(void)
 
     static const u8 rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };   // LBA 0, 2 blocks
     rc = ufs_scsi(rd10, 10, ufs_data, 2 * UFS_BLOCK, &ocs, &st);
+    if (rc)
+        kvh("  resp0 ", rbe32(ucd_buf.resp), "  resp4 ", rbe32(ucd_buf.resp + 4));
     kvh("  READ rc ", rc, "  ocs/st ", ocs << 8 | st);
     if (rc)
         return;

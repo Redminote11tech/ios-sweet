@@ -4,6 +4,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **t5 UFS probe #2 (observed, 11:13):** with HCE ignored and 4 KiB PRDT pieces, the first TEST UNIT READY completes with **OCS 0x07 (fatal error)**, then every command times out (host stuck until reboot). Nothing written. Suspects: DMA to the shim image at 0x8008xxxx not allowed (Exynos SMU), CT 1 vs S-Boot's 0, 512 vs 1024-byte UPIU areas. Probe #3 matches S-Boot on all three: buffers at `0xef100000` (free RAM next to S-Boot's list at `0xef002000`), CT from S-Boot's UTRD (0), 1 KiB command/response areas, PRDT at 2 KiB.
+
 - **USERSPACE ON THE S9 (observed, 10:48):** `rd=md0` RAM disk, mockfs serves tools/sweet-init as /sbin/launchd: `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` every 5 s.
 - **t5 UFS probe #1 (observed, 11:10):** UFSHCI ver `0x210`, cap `0x1303ff0f` (16 slots), **HCE reads 0** while HCS = `0x10f` (DP, UTRLRDY, UTMRLRDY, UCRDY): Exynos broken-HCE quirk, the probe's HCE check stopped it. S-Boot list at `0xef002000`, its UCD at `0xef000000`, slot 0 dw0 `0x01000000` resp field `0x04000400` (byte offsets: Exynos PRDT_BYTE_GRAN quirk). Vendor TXPRDT/RXPRDT = `0xc` (12: max 4 KiB per PRDT entry), vs 0x0c = `0xa6`. Probe #2 ignores HCE and splits PRDT into 4 KiB entries.
 
