@@ -1,0 +1,39 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 1e694a7..4bf2bf8 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -76,8 +76,11 @@ SweetCPU::start(IOService *provider)
+ 	}
+ 	/*
+ 	 * Redmi (SM7150, DynamIQ): MPIDR Aff1 = core, 0x000-0x500 A55, 0x600/0x700 A76.
+-	 * Galaxy S9 (Exynos 9810): Aff1 = cluster, Aff0 = core: 0x0-0x3 A55,
+-	 * 0x100-0x103 Mongoose.
++	 * Galaxy S9 (Exynos 9810): the A55 cluster is DynamIQ too (MT=1, Aff1 =
++	 * core: 0x000-0x300, measured with the shim's SMP probe); the Mongoose
++	 * cores are Aff1 = cluster, Aff0 = core (0x100-0x103, not used yet).
++	 * The firmware's PSCI CPU_ON wants its own core index (1-3 for the A55s),
++	 * so the ADT may carry a 'psci-id' per cpu (see startCPU).
+ 	 */
+ 	bool redmi = cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0;
+ 	bool exynos = (cpu->phys_id >> 8) <= 1 && (cpu->phys_id & 0xff) <= 3;
+@@ -236,10 +239,17 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 		panic("SWEET CPU: cpu=%u unsupported restart", getCPUNumber());
+ 	}
+ 	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
+-	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
+-	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
++	/* PSCI target: the MPIDR, unless the ADT cpu node names the firmware's id. */
++	uint64_t target = cpu->phys_id;
++	OSData *psci = getProvider() ?
++	    OSDynamicCast(OSData, getProvider()->getProperty("psci-id")) : NULL;
++	if (psci != NULL && psci->getLength() == sizeof(uint32_t)) {
++		target = *(const uint32_t *)psci->getBytesNoCopy();
++	}
++	IOLog("SWEET CPU: cpu=%u CPU_ON mpidr=0x%x target=0x%llx entry_pa=0x%llx context=%u\n",
++	    getCPUNumber(), cpu->phys_id, target, (uint64_t)entry, getCPUNumber());
+ 	__builtin_arm_dsb(DSB_SY);
+-	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
++	int32_t rc = sweet_psci_cpu_on(target, entry, getCPUNumber());
+ 	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
+ 	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
+ 	if (rc != 0) {

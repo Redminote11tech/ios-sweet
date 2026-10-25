@@ -71,11 +71,17 @@ def build(seed=None):
     ], [node('memory-map', [ph()]),
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # All eight cores in MPIDR order; the kernel starts cpus=N of them (N=1 for now).
+    # All eight cores; the kernel starts cpus=N of them. 'reg' is what the core
+    # reads in MPIDR_EL1 (Aff1:Aff0), matched by the kernel's reset vector: the
+    # A55 cluster is DynamIQ (MT=1, Aff1 = core -> 0x000..0x300, measured with
+    # the shim's SMP probe 6); the Mongoose cores are Aff1 = cluster, Aff0 = core.
+    # 'psci-id' is the index the firmware's PSCI CPU_ON wants (1..3 start the
+    # A55s; it accepts 0x100.. for the Mongooses but those still hang, see NOTES).
     cpu_nodes = []
     for core in range(8):
         big = core >= 4
-        mpidr = (0x100 | (core - 4)) if big else core
+        mpidr = (0x100 | (core - 4)) if big else (core << 8)
+        psci_id = (0x100 | (core - 4)) if big else core
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
@@ -85,6 +91,7 @@ def build(seed=None):
             ('compatible', cstr('samsung,mongoose-m3' if big else 'arm,cortex-a55') +
              cstr('qcom,kryo470') + cstr('ARM,v8')),
             ('reg', u32(mpidr)),
+            ('psci-id', u32(psci_id)),
             ('cpu-id', u32(core)),
             ('cluster-id', u32(0)),
             ('cluster-type', u32(0)),
