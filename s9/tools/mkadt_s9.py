@@ -74,7 +74,11 @@ def build(seed=None):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('samsung,mongoose-m3' if big else 'arm,cortex-a55') + cstr('ARM,v8')),
+            # 'qcom,kryo470' is what the SweetCPU driver matches (IONameMatch in
+            # KernelConfigTables.cpp); without it no driver attaches to the CPU
+            # nubs and the boot thread waits forever in PE_lockdown_iokit.
+            ('compatible', cstr('samsung,mongoose-m3' if big else 'arm,cortex-a55') +
+             cstr('qcom,kryo470') + cstr('ARM,v8')),
             ('reg', u32(mpidr)),
             ('cpu-id', u32(core)),
             ('cluster-id', u32(0)),
