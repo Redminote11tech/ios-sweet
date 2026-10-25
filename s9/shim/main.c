@@ -1294,7 +1294,6 @@ static void input_test(void)
     puts_("Press vol+ vol- bixby power, touch the screen (20 s)\n");
     int row = cur_y;
     u32 cnt[5] = { 0 }, last[5], v[5];
-    const char *name[5] = { "vol+ ", "vol- ", "bixby ", "power ", "t-irq " };
     for (int k = 0; k < 2; k++) {
         u32 a0 = bank_dat(PIN_ALIVE, 0), a1 = bank_dat(PIN_ALIVE, 1), a2 = bank_dat(PIN_ALIVE, 2);
         v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
@@ -1315,7 +1314,15 @@ static void input_test(void)
                 last[i] = v[i];
             }
             color(v[i] ? DIM : OK);
-            puts_(name[i]);
+            // no table of string pointers: the shim runs where S-Boot put it,
+            // and initialised pointers hold link-time (0-based) addresses
+            switch (i) {
+            case 0: puts_("vol+ "); break;
+            case 1: puts_("vol- "); break;
+            case 2: puts_("bixby "); break;
+            case 3: puts_("power "); break;
+            default: puts_("t-irq "); break;
+            }
             color(FG);
             dec(v[i]);
             putch('/');
