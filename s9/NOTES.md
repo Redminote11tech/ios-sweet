@@ -8,5 +8,7 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 - **Shim T2 passed (observed):** EL1, Cortex-A55 r0p1, TGran16 supported, PA 40 bit, ISAR1 no PAC, PFR0 `0x10112222` (GIC field 0: no ICC_* sysregs), CNTFRQ 0, FDT at `0x8a000000`, load address varies per boot, 4 memory banks (4015 MiB), 2 GiB bank at `0x880000000` read/write OK (sparse 2048/2048, dense 16 MiB).
 - **Kernel patches 0082 (GICv2) and 0083 (boot_args framebuffer)** pushed; first CI build `40177226600` (workflow_dispatch: pushes from this session did not start a run).
 - **Shim loader:** `s9/shim` links the mkpayload payload into the image and loads it into the 2 GiB bank (by-address cache clean before copying, MMU off, x0 = boot_args).
-- Next: build `xnu-Image` from the CI kernel, flash, photograph the screen. Gate: XNU console text.
+- **First kernel built:** xnu run `40177226600` (0082+0083 compile). Kernel 17.2 MB, entry pa `0x88148c488`, kernel `0x881004000`-`0x8824c8000`, ADT `0x8824c8000`, boot_args `0x8824cc000`.
+- **s9-image workflow** packages the image (artifact `s9-xnu-image` + branch `s9-builds`, which this session can fetch; artifact/log downloads are blocked here). Loader host test passes: all 10 segments, ADT and boot_args land where expected.
+- `xnu-Image` 16.7 MB sent to the user for the first XNU boot. Gate: XNU console text. Expect the white band bottom-left (start.s stage 0) and "SWEET EARLY n" lines if the kernel starts.
 - Phone screen has an old water-damage defect (garbage at boot sometimes); test screens drew cleanly.
