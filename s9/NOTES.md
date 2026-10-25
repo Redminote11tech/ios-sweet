@@ -4,6 +4,9 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **USERSPACE ON THE S9 (observed, 10:48):** `rd=md0` RAM disk, mockfs serves tools/sweet-init as /sbin/launchd: `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` every 5 s.
+- **t5 UFS probe #1 (observed, 11:10):** UFSHCI ver `0x210`, cap `0x1303ff0f` (16 slots), **HCE reads 0** while HCS = `0x10f` (DP, UTRLRDY, UTMRLRDY, UCRDY): Exynos broken-HCE quirk, the probe's HCE check stopped it. S-Boot list at `0xef002000`, its UCD at `0xef000000`, slot 0 dw0 `0x01000000` resp field `0x04000400` (byte offsets: Exynos PRDT_BYTE_GRAN quirk). Vendor TXPRDT/RXPRDT = `0xc` (12: max 4 KiB per PRDT entry), vs 0x0c = `0xa6`. Probe #2 ignores HCE and splits PRDT into 4 KiB entries.
+
 - **PHASE 3 COMPLETE (observed, 10:41 local):** with `qcom,kryo470` in the CPU compatibles, `SweetCPU: 1/1 CPUs initialized, SGI1 verified`, IORTC 30 s wait completes, calendar initialized, all of bsd_init runs (vfs, AMFI + Sandbox policies, HFS, mbuf, skywalk self-tests PASSED, loopback), then `Waiting on <dict ... IOMedia ... Apple_HFS>`. `Failed to write boot-picker-bringup-reason to NVRAM` is harmless.
 - Next image: RAM-disk root (`rd=md0`, mockfs serves tools/sweet-init as /sbin/launchd), s9-image default from now on. xnu-Image 16736256 bytes.
 

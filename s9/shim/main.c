@@ -729,7 +729,7 @@ static struct ucd ucd_buf __attribute__((aligned(128)));
 static u8 ufs_data[2 * UFS_BLOCK] __attribute__((aligned(4096)));
 static u8 gpt_ents[128 * 128] __attribute__((aligned(4096)));
 static int ufs_bytes;                       // offsets/lengths in bytes (Exynos quirk), else DWORDs
-static u32 ufs_prdt_entry = 16;             // PRDT entry size in bytes
+static u32 ufs_prdt_max = 4096;             // bytes per PRDT entry (Exynos HCI_TXPRDT_ENTRY_SIZE)
 
 static void zero(void *p, u32 n)
 {
@@ -766,11 +766,18 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
     utrl[0].ucdbau = (u32)(ucd_pa >> 32);
     utrl[0].resp = (512u / unit) << 16 | (512u / unit);
     if (len) {
+        // Exynos: one PRDT entry covers at most 2^txprdt bytes (4 KiB here).
+        u32 chunk = ufs_prdt_max, n = (len + chunk - 1) / chunk;
+        if (n > 8)
+            return 5;                       // more than our PRDT holds
         u64 b = (u64)buf;
-        ucd_buf.prdt[0] = (u32)b;
-        ucd_buf.prdt[1] = (u32)(b >> 32);
-        ucd_buf.prdt[3] = len - 1;
-        utrl[0].prdt = (1024u / unit) << 16 | (ufs_bytes ? ufs_prdt_entry : 1);
+        for (u32 i = 0; i < n; i++) {
+            u32 piece = len - i * chunk < chunk ? len - i * chunk : chunk;
+            ucd_buf.prdt[4 * i + 0] = (u32)(b + i * chunk);
+            ucd_buf.prdt[4 * i + 1] = (u32)((b + i * chunk) >> 32);
+            ucd_buf.prdt[4 * i + 3] = piece - 1;
+        }
+        utrl[0].prdt = (1024u / unit) << 16 | (ufs_bytes ? n * 16 : n);
     }
     __asm__ volatile("dsb sy" ::: "memory");
     ufs_wr(0x58, 1);                        // UTRLDBR slot 0
@@ -836,18 +843,21 @@ static void __attribute__((unused)) ufs_probe(void)
     }
     // Byte granularity if S-Boot's response offset is 512 (bytes) rather than 128 (DWORDs).
     ufs_bytes = (sb_resp >> 16) >= 512;
-    u32 ent = vs_rd(0x00) & 0x1f;
-    if (ent >= 4 && ent <= 7)
-        ufs_prdt_entry = 1u << ent;
+    u32 ent = vs_rd(0x00) & 0x1f;           // log2 of the bytes one PRDT entry may cover
+    if (ent >= 9 && ent <= 17)
+        ufs_prdt_max = 1u << ent;
     color(DIM);
     puts_("  format: ");
     color(FG);
     puts_(ufs_bytes ? "bytes" : "dwords");
-    puts_(", PRDT entry ");
-    dec(ufs_prdt_entry);
+    puts_(", max per PRDT entry ");
+    dec(ufs_prdt_max);
     putch('\n');
 
-    if (!(hce & 1) || !(hcs & 1) || !(hcs & 2)) {
+    // Exynos HCE reads 0 even while running (Linux: UFSHCI_QUIRK_BROKEN_HCE),
+    // so only require device present + transfer list ready in HCS.
+    (void)hce;
+    if (!(hcs & 1) || !(hcs & 2)) {
         color(BAD);
         puts_("  host not enabled/ready: stop\n");
         return;
