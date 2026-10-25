@@ -37,3 +37,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 - Probe #6 (nexus bit, 4 KiB PRDT, OCS 7 quirk, TUR retry fixed): every TUR, READ CAPACITY and READ(10) on LUN 0 completes with rc 4, resp 0x102 (CHECK CONDITION), sense len 0x12, **sense key 2 NOT READY, ASC/ASCQ 04/02 "initializing command required"**. Transport works; the device was left powered down by S-Boot.
 - Probe #7: before TUR, send START STOP UNIT (0x1b, byte 4 = 0x10, power condition ACTIVE) to the UFS device W-LUN 0xd0, as Linux ufshcd_set_dev_pwr_mode() does. Power command only, no media writes. Then TUR/CAP/READ GPT as before.
+
+## 2026-10-25 UFS probe #7: reads work
+
+- SSU (0x1b, ACTIVE) to W-LUN 0xd0: rc 0. Then TUR rc 0, READ CAPACITY rc 0 (LUN 0 last LBA 0xee47ff, block 4096 = 59.6 GiB), READ(10) rc 0, GPT header "EFI PART" at LBA 2 (4K-sector GPT: header LBA 1 x 4096?, printed "at lba 0x2" entries), partitions BOTA0 0x400, BOTA1 0x800, BOTA2 0x3402, BOOT 0x4c02, SYSTEM 0x10c80, USERDATA 0x1a8580 (54204 MiB).
+- Recipe for the XNU driver: keep link as-is (lanes 2/2, no link startup), nexus bit per SCSI slot (vs+0x40), byte offsets in UTRD, PRDT <= 4 KiB per entry, ignore OCS 7, SSU ACTIVE to W-LUN 0xd0 before LUN 0 I/O. Block size 4096.
