@@ -1297,7 +1297,7 @@ static void input_test(void)
     // Buttons and the touch attention line, live for 20 s: press each button
     // and touch the screen; counters show every change seen.
     color(HEAD);
-    puts_("Press vol+ vol- bixby power, touch the screen (20 s)\n");
+    puts_("Press vol+ vol- bixby power, touch the screen (5 s)\n");
     int row = cur_y;
     u32 cnt[5] = { 0 }, last[5], v[5];
     u32 prev[6], ev = 0;
@@ -1305,7 +1305,7 @@ static void input_test(void)
         prev[b] = bank_dat(PIN_ALIVE, b);
     for (int i = 0; i < 5; i++)
         last[i] = 2;
-    u64 end = now() + 20 * TB_HZ;
+    u64 end = now() + 5 * TB_HZ;     // buttons proven (probe #5): short now
     while (now() < end) {
         u32 a0 = bank_dat(PIN_ALIVE, GPA0), a1 = bank_dat(PIN_ALIVE, GPA1), a2 = bank_dat(PIN_ALIVE, GPA2);
         v[0] = (a0 >> 3) & 1; v[1] = (a0 >> 4) & 1; v[2] = (a0 >> 6) & 1;
@@ -1371,6 +1371,55 @@ static void input_test(void)
     con = (con & ~(0xffu << 16)) | (0x22u << 16);
     wr32(PIN_PERIC0 + 0x20, con);
     kvh("  gpp1 con ", rd32(PIN_PERIC0 + 0x20), "  dat ", bank_dat(PIN_PERIC0, 1));
+    // Probe #5: USI out of reset but HSI2C registers still read 0 and ignore
+    // writes: its clocks are off. CMU_PERIC0 at 0x10400000 (as on Exynos
+    // 8895, Linux clk-exynos8895.c): gate registers 0x2000.., bit 20 MANUAL,
+    // bit 21 CG_VALUE (on), bit 28 ENABLE_HWACG. Like Linux
+    // exynos_arm64_init_clocks + clk_enable: manual mode, clock on, for every
+    // gate-shaped register (only bits 20/21/28/29 in use).
+    color(HEAD);
+    puts_("CMU_PERIC0 0x10400000\n");
+    {
+        const u64 cmu = 0x10400000UL;
+        kvh("  +0100 ", rd32(cmu + 0x100), "  +0140 ", rd32(cmu + 0x140));
+        u32 n = 0, on = 0, col = 0;
+        for (u32 o = 0x2000; o < 0x2200; o += 4) {
+            u32 v = rd32(cmu + o);
+            if (v & ~0x30300000u)
+                continue;               // not a gate
+            n++;
+            if (!(v & (1u << 21)) || (v & (1u << 28))) {
+                if (col < 12) {          // first changed ones: offset:old
+                    color(DIM);
+                    hex(o & 0xfff, 3);
+                    putch(':');
+                    color(FG);
+                    hex(v >> 20, 3);
+                    putch(' ');
+                    if (++col % 4 == 0)
+                        putch('\n');
+                }
+                wr32(cmu + o, (v & ~(1u << 28)) | 1u << 20 | 1u << 21);
+                on++;
+            }
+        }
+        putch('\n');
+        kvh("  gates ", n, "  switched on ", on);
+        // user muxes (PLL_CON0 .._USER at 0x100 + 0x20 * i): bit 4 = not oscclk
+        color(DIM);
+        puts_("  mux ");
+        color(FG);
+        for (u32 o = 0x100; o < 0x300; o += 0x20) {
+            u32 v = rd32(cmu + o);
+            if (v) {
+                hex(o, 3);
+                putch(':');
+                hex(v, 1);
+                putch(' ');
+            }
+        }
+        putch('\n');
+    }
     // USI v2 wrapper (+0xc4 USI_CON bit0 = reset, +0xc8 USI_OPTION):
     // release the reset, clock request on, clock stop off (Linux exynos-usi).
     wr32(HSI2C10 + 0xc8, (rd32(HSI2C10 + 0xc8) & ~(1u << 2)) | (1u << 1));
