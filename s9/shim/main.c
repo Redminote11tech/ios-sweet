@@ -2160,39 +2160,43 @@ static void smp_try(u64 mpidr, u64 entry, u32 ctx, int pmuseq, int sgi)
     color(FG);
 }
 
+static void big_try(u64 mpidr)
+{
+    u32 slot = (mpidr & 0xff) + ((mpidr >> 8) & 0xff) * 4;
+    u64 mb = SMP_MBOX + slot * 16;
+    color(HEAD);
+    kvh("CPU_ON ", (u32)mpidr, "  status ", safe_rd32(PMU + core_status_off(mpidr)));
+    color(FG);
+    puts_("  calling firmware...\n");
+    u64 t0 = now();
+    u64 rc = psci(0xC4000003UL, mpidr, (u64)smp_entry, 0);
+    u64 t1 = now();
+    kvh("  returned rc ", (u32)rc, "  ms ", (u32)((t1 - t0) / (TB_HZ / 1000)));
+    while (!rd32(mb) && now() - t1 < 2 * TB_HZ)
+        ;
+    u32 m = rd32(mb);
+    kvh("  mbox ", m, "  status ", safe_rd32(PMU + core_status_off(mpidr)));
+    color(m >> 16 == 0x5ec0 ? OK : BAD);
+    puts_(m >> 16 == 0x5ec0 ? "  CORE RAN\n" : "  core did not run\n");
+    color(FG);
+}
+
 static void smp_test(void)
 {
-    u64 el;
-    __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
     color(HEAD);
-    puts_("SMP probe 3 (t8)\n");
-    kvh("  EL ", (u32)(el >> 2), "  GICD_CTLR ", safe_rd32(GICD));
-    kvh("  GICC_CTLR ", safe_rd32(GICC), "  BID_EN ", safe_rd32(0x14070200UL));
-    kvh("  st1 ", safe_rd32(PMU + 0x202c), "  st2 ", safe_rd32(PMU + 0x2034));
-    color(HEAD);
-    puts_("cpu 1: plain\n");
-    smp_try(1, (u64)smp_entry, 0x11, 0, 0);
-    // enable the distributor (NS group 1) and our CPU interface
-    safe_wr32(GICD, safe_rd32(GICD) | 1);
-    safe_wr32(GICC, safe_rd32(GICC) | 1);
-    color(HEAD);
-    puts_("cpu 2: GIC on + SGI kick\n");
-    smp_try(2, (u64)smp_entry, 0x22, 0, 1);
-    color(HEAD);
-    puts_("cpu 3: PMU core_on seq + SGI\n");
-    smp_try(3, (u64)smp_entry, 0x33, 1, 1);
-    color(HEAD);
-    puts_("cpu 1 again (kick)\n");
-    safe_wr32(GICD + 0xf00, (1u << 17) | 1);
-    u64 t0 = now();
-    while (!rd32(SMP_MBOX + 16) && now() - t0 < TB_HZ)
-        ;
-    kvh("  mbox ", rd32(SMP_MBOX + 16), "  st ", safe_rd32(PMU + 0x202c));
+    puts_("SMP probe 4 (t8): big cores\n");
+    kvh("  slot4 left from last run ", rd32(SMP_MBOX + 4 * 16), "", 0);
+    for (int i = 0; i < 8 * 16; i += 4)
+        wr32(SMP_MBOX + i, 0);
+    __asm__ volatile("dsb sy" ::: "memory");
+    big_try(0x100);
+    big_try(0x101);
+    big_try(0x102);
+    big_try(0x103);
     color(HEAD);
     puts_("all mailbox slots:\n");
     for (int i = 0; i < 8; i += 2)
         kvh("  ", rd32(SMP_MBOX + i * 16), "  ", rd32(SMP_MBOX + (i + 1) * 16));
-    kvh("  GICD_CTLR ", safe_rd32(GICD), "  faults ", safe_faults);
 }
 #endif
 
