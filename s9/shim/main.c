@@ -711,6 +711,9 @@ void shim_irq(void) {}
 static inline u32 ufs_rd(u32 off) { return *(volatile u32 *)(UFS_HCI + off); }
 static inline void ufs_wr(u32 off, u32 v) { *(volatile u32 *)(UFS_HCI + off) = v; }
 static inline u32 vs_rd(u32 off) { return *(volatile u32 *)(UFS_VS + off); }
+static inline void vs_wr(u32 off, u32 v) { *(volatile u32 *)(UFS_VS + off) = v; }
+#define VS_UTRL_NEXUS_TYPE 0x40             // Exynos: bit n = slot n carries a SCSI command
+static u32 ufs_is_before, ufs_is_after;     // interrupt status around the last command
 
 struct utrd {
     u32 dw0, dw1, dw2, dw3, ucdba, ucdbau, resp, prdt;
@@ -785,17 +788,28 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
         utrl[0].prdt = (2048u / unit) << 16 | (ufs_bytes ? n * 16 : n);
     }
     __asm__ volatile("dsb sy" ::: "memory");
+    // Exynos (Linux ufs-exynos.c): mark slot 0 as a SCSI command (I_T_L_Q nexus),
+    // and clear any completion/error status left by the previous request.
+    vs_wr(VS_UTRL_NEXUS_TYPE, vs_rd(VS_UTRL_NEXUS_TYPE) | 1);
+    ufs_is_before = ufs_rd(0x20);
+    if (ufs_is_before)
+        ufs_wr(0x20, ufs_is_before);
+    __asm__ volatile("dsb sy" ::: "memory");
     ufs_wr(0x58, 1);                        // UTRLDBR slot 0
     u64 t0 = now();
     while (ufs_rd(0x58) & 1)
         if (now() - t0 > TB_HZ) {           // 1 s
+            ufs_is_after = ufs_rd(0x20);
             ufs_wr(0x5c, ~1u);              // UTRLCLR slot 0
             return 1;
         }
     __asm__ volatile("dsb sy" ::: "memory");
+    ufs_is_after = ufs_rd(0x20);
     *ocs = utrl[0].dw2 & 0xff;
     *st = ucd_buf.resp[7];
-    if (*ocs)
+    // Exynos reports OCS 0x07 (FATAL_ERROR) for requests that did complete
+    // (Linux: UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR): judge by the response UPIU.
+    if (*ocs && *ocs != 0x07)
         return 2;
     if (ucd_buf.resp[0] != 0x21)
         return 3;
@@ -893,9 +907,11 @@ static void __attribute__((unused)) ufs_probe(void)
 
     u32 ocs = 0, st = 0, rc = 1;
     static const u8 tur[6] = { 0 };
-    for (int i = 0; i < 3 && rc; i++) {
+    kvh("  nexus ", vs_rd(VS_UTRL_NEXUS_TYPE), "  is ", ufs_rd(0x20));
+    for (int i = 0; i < 4 && rc; i++) {     // the first answer is a unit attention
         rc = ufs_scsi(tur, 6, 0, 0, &ocs, &st);
         kvh("  TUR rc ", rc, "  ocs/st ", ocs << 8 | st);
+        kvh("    is ", ufs_is_before, " -> ", ufs_is_after);
     }
     static const u8 cap10[10] = { 0x25 };
     rc = ufs_scsi(cap10, 10, ufs_data, 8, &ocs, &st);

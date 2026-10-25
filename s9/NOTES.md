@@ -4,6 +4,8 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 
 ## 2026-10-25
 
+- **t5 UFS probe #3 (observed, 11:15):** buffers at 0xef100000, CT 0, 1 KiB areas. First TUR again OCS 0x07 with SCSI status 0x02, later commands time out, BUT the response area after READ holds a RESPONSE UPIU `0x21000005` (tag 5 = the READ) with `0x00000102` (response 1, status CHECK CONDITION): the device receives and answers our requests. Reading: Exynos BROKEN_OCS_FATAL_ERROR quirk (OCS 7 on completed requests) + doorbell not clearing. Probe #4 sets the vendor UTRL_NEXUS_TYPE bit for the slot (vs+0x40, as ufs-exynos.c does for SCSI commands), clears IS before each request, treats OCS 7 as "check the response UPIU".
+
 - **t5 UFS probe #2 (observed, 11:13):** with HCE ignored and 4 KiB PRDT pieces, the first TEST UNIT READY completes with **OCS 0x07 (fatal error)**, then every command times out (host stuck until reboot). Nothing written. Suspects: DMA to the shim image at 0x8008xxxx not allowed (Exynos SMU), CT 1 vs S-Boot's 0, 512 vs 1024-byte UPIU areas. Probe #3 matches S-Boot on all three: buffers at `0xef100000` (free RAM next to S-Boot's list at `0xef002000`), CT from S-Boot's UTRD (0), 1 KiB command/response areas, PRDT at 2 KiB.
 
 - **USERSPACE ON THE S9 (observed, 10:48):** `rd=md0` RAM disk, mockfs serves tools/sweet-init as /sbin/launchd: `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` every 5 s.
