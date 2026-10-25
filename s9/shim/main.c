@@ -1280,6 +1280,98 @@ static u32 hs_xfer(int read, u8 *buf, u32 len)
     return (st & 0x7f00) ? st : (st & 0x80 ? 0 : 0x40000000 | st);
 }
 
+
+// SPEEDY (Samsung one-wire PMIC bus) at 0x141C0000, polled. Register map and
+// sequence from Markuss Broks' Linux driver for Exynos9810 (LKML 2024-12,
+// "soc: samsung: Add a driver for Samsung SPEEDY host controller").
+// Address = (device << 8 | register) << 7; S2MPS18 PMIC block = device 1.
+#define SPEEDY 0x141C0000UL
+#define SP_CTRL 0x000
+#define SP_FIFO_CTRL 0x004
+#define SP_CMD 0x008
+#define SP_INT_EN 0x00c
+#define SP_INT_ST 0x010
+#define SP_TX 0x034
+#define SP_RX 0x038
+
+static void sp_prep(void)
+{
+    safe_wr32(SPEEDY + SP_FIFO_CTRL, safe_rd32(SPEEDY + SP_FIFO_CTRL) | 1u << 31);   // FIFO reset
+    wait_ticks(TB_HZ / 100000);
+    safe_wr32(SPEEDY + SP_FIFO_CTRL, safe_rd32(SPEEDY + SP_FIFO_CTRL) | 1u | 1u << 8);  // RX/TX length 1
+    safe_wr32(SPEEDY + SP_INT_ST, 0xffffffffu);
+    wait_ticks(TB_HZ / 100000);
+}
+
+static int sp_wait(void)
+{
+    u64 t0 = now();
+    while (now() - t0 < TB_HZ / 20)                              // 50 ms
+        if (safe_rd32(SPEEDY + SP_INT_ST) & 1)
+            return 0;
+    return -1;
+}
+
+// 0..255 = value, < 0 = error
+static int speedy_read(u32 dev, u32 reg)
+{
+    sp_prep();
+    safe_wr32(SPEEDY + SP_INT_EN, 1u | 1u << 8 | 1u << 9 | 7u << 16 | 1u << 31);
+    safe_wr32(SPEEDY + SP_CMD, 1u << 19 | ((dev & 0xf) << 15) | ((reg & 0xff) << 7));
+    if (sp_wait())
+        return -1;
+    u32 v = safe_rd32(SPEEDY + SP_RX);
+    safe_wr32(SPEEDY + SP_INT_ST, 0xffffffffu);
+    return (int)(v & 0xff);
+}
+
+static int speedy_write(u32 dev, u32 reg, u32 val)
+{
+    sp_prep();
+    safe_wr32(SPEEDY + SP_INT_EN, 1u | 1u << 4 | 1u << 20 | 1u << 21 | 1u << 31);
+    safe_wr32(SPEEDY + SP_CMD, 1u << 19 | 1u << 20 | ((dev & 0xf) << 15) | ((reg & 0xff) << 7));
+    safe_wr32(SPEEDY + SP_TX, val & 0xff);
+    int r = sp_wait();
+    safe_wr32(SPEEDY + SP_INT_ST, 0xffffffffu);
+    return r;
+}
+
+// Touch power: S2MPS18 LDO35 (tsp_io 1.8 V, reg 0x6C) and LDO43 (tsp_avdd
+// 3.3 V, reg 0x74); enable = bits 7:6 (Samsung s2mps18-private.h). Read,
+// show, then only set the enable bits, voltage bits untouched.
+static void touch_power(void)
+{
+    color(HEAD);
+    puts_("Touch power (S2MPS18 via SPEEDY)\n");
+    safe_faults = 0;
+    u32 ctrl = safe_rd32(SPEEDY + SP_CTRL);
+    kvh("  speedy ctrl ", ctrl, "  faults ", safe_faults);
+    if (safe_faults)
+        return;
+    if (!(ctrl & 1)) {                                          // not enabled: init like Linux
+        safe_wr32(SPEEDY + SP_INT_ST, 0xffffffffu);
+        safe_wr32(SPEEDY + SP_CTRL, ctrl | 1u << 31);
+        wait_ticks(TB_HZ / 50);
+        safe_wr32(SPEEDY + SP_CTRL, safe_rd32(SPEEDY + SP_CTRL) | 1u);
+        wait_ticks(TB_HZ / 50);
+    }
+    int l35 = speedy_read(1, 0x6c), l43 = speedy_read(1, 0x74), id = speedy_read(0, 0x00);
+    kvh("  L35 ", (u32)l35, "  L43 ", (u32)l43);
+    kvh("  top 0x00 ", (u32)id, "", 0);
+    if (l35 < 0 || l43 < 0 || (l35 & 0x3f) == 0 || (l43 & 0x3f) == 0) {
+        color(BAD);
+        puts_("  read failed or no voltage set: not touching the PMIC\n");
+        return;
+    }
+    int w1 = (l35 & 0xc0) == 0xc0 ? 0 : speedy_write(1, 0x6c, (u32)l35 | 0xc0);
+    int w2 = (l43 & 0xc0) == 0xc0 ? 0 : speedy_write(1, 0x74, (u32)l43 | 0xc0);
+    wait_ticks(TB_HZ / 10);                                      // ramp + touch boot
+    kvh("  after L35 ", (u32)speedy_read(1, 0x6c), "  L43 ", (u32)speedy_read(1, 0x74));
+    kvh("  write rc ", (u32)(w1 & 0xff) << 8 | (u32)(w2 & 0xff), "", 0);
+    kvh("  gpp1 dat ", bank_dat(PIN_PERIC0, 1), "  gpa1 dat ", bank_dat(PIN_ALIVE, GPA1));
+    wait_ticks(TB_HZ / 5);                                       // S6SY761 needs ~100 ms after power
+}
+
 static void input_test(void)
 {
     color(HEAD);
@@ -1364,6 +1456,8 @@ static void input_test(void)
     // exception screen then shows where. Button results are already shown.
     // (pre-init HSI2C dump dropped in probe #9: it was all zeros and the
     // screen ran out of lines)
+    touch_power();
+
     // Touch chip: I2C pins to their I2C function (gpp1-4/5 = 2), then
     // write command 0x52 (device ID) and read 3 bytes.
     color(HEAD);
