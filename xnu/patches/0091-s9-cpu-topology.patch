@@ -1,0 +1,20 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -74,9 +74,14 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
+-	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+-	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++	/*
++	 * Redmi (SM7150, DynamIQ): MPIDR Aff1 = core, 0x000-0x500 A55, 0x600/0x700 A76.
++	 * Galaxy S9 (Exynos 9810): Aff1 = cluster, Aff0 = core: 0x0-0x3 A55,
++	 * 0x100-0x103 Mongoose.
++	 */
++	bool redmi = cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0;
++	bool exynos = (cpu->phys_id >> 8) <= 1 && (cpu->phys_id & 0xff) <= 3;
++	if ((!redmi && !exynos) || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}

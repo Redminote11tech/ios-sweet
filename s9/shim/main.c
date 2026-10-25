@@ -1967,6 +1967,84 @@ static void mali_regs(const char *when)
     kvh("  L2_READY ", srd(MALI + 0x160, 0), "  TILER_READY ", srd(MALI + 0x150, 0));
 }
 
+
+// First GPU job: Mali MMU address space 0 in AArch64 4K mode (as Linux
+// panfrost_mmu.c: TRANSCFG ADRMODE_AARCH64_4K | INA_BITS(55-48) |
+// PTW_MEMATTR_WB | PTW_RA, ARM LPAE stage-1 tables), identity-mapping the
+// 2 MiB block at GPU_MEM; then one WRITE_VALUE job (type 2, Immediate32) on
+// job slot 1. GPU memory is non-cacheable on both sides (MMU off here,
+// MEMATTR 0x4c), so no cache maintenance is needed.
+#define GPU_MEM   0xef200000UL
+#define GPU_PT0   (GPU_MEM + 0x0000)
+#define GPU_PT1   (GPU_MEM + 0x1000)
+#define GPU_PT2   (GPU_MEM + 0x2000)
+#define GPU_JOB   (GPU_MEM + 0x10000)
+#define GPU_DST   (GPU_MEM + 0x20000)
+#define AS0       (MALI + 0x2400)
+#define JOBCTRL   (MALI + 0x1000)
+#define JS1       (MALI + 0x1800 + 0x80)
+
+static void wr64(u64 a, u64 v) { wr32(a, (u32)v); wr32(a + 4, (u32)(v >> 32)); }
+
+static int as0_wait(void)
+{
+    u64 t0 = now();
+    while (srd(AS0 + 0x28, 0) & 1)                  // AS_STATUS ACTIVE
+        if (now() - t0 > TB_HZ / 100)
+            return -1;
+    return 0;
+}
+
+static void gpu_first_job(void)
+{
+    color(HEAD);
+    puts_("First GPU job (MMU AS0 + WRITE_VALUE)\n");
+    for (u64 a = GPU_MEM; a < GPU_MEM + 0x21000; a += 4)
+        wr32(a, 0);
+    // identity map of the 2 MiB block holding GPU_MEM (L0 -> L1 -> L2 block)
+    u64 va = GPU_MEM & ~0x1fffffUL;
+    wr64(GPU_PT0 + 8 * ((va >> 39) & 511), GPU_PT1 | 3);
+    wr64(GPU_PT1 + 8 * ((va >> 30) & 511), GPU_PT2 | 3);
+    wr64(GPU_PT2 + 8 * ((va >> 21) & 511), va | 0x741);   // block: AF, SH inner, AP rw, attr 0
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    // AS0: lock-free setup, then UPDATE
+    wr64(AS0 + 0x00, GPU_PT0);                                  // TRANSTAB
+    wr64(AS0 + 0x08, 0x4c4c4c4c4c4c4c4cULL);                    // MEMATTR: non-cacheable
+    wr64(AS0 + 0x30, 6u | (55u - 48u) << 6 | 2u << 24 | 1u << 30);  // TRANSCFG
+    wr32(AS0 + 0x18, 1);                                        // COMMAND UPDATE
+    kvh("  AS0 update ", (u32)as0_wait(), "  status ", srd(AS0 + 0x28, 0));
+
+    // job descriptor: 32-byte header + write-value payload
+    wr32(GPU_JOB + 0x10, 1u | 2u << 1);        // 64-bit descriptor, job_type WRITE_VALUE
+    wr32(GPU_JOB + 0x10, (1u | 2u << 1) | (1u << 16));   // job_index 1
+    wr64(GPU_JOB + 0x18, 0);                   // next_job
+    wr64(GPU_JOB + 0x20, GPU_DST);             // payload: address
+    wr32(GPU_JOB + 0x28, 6);                   // Immediate 32
+    wr64(GPU_JOB + 0x30, 0xc0ffee42);          // immediate value
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    wr32(JOBCTRL + 0x004, 0xffffffff);                          // JOB_IRQ_CLEAR
+    wr64(JS1 + 0x40, GPU_JOB);                                  // HEAD_NEXT
+    wr64(JS1 + 0x50, srd(MALI + 0x100, 0));                     // AFFINITY_NEXT
+    wr32(JS1 + 0x58, 0u | 3u << 8 | 3u << 12 | 8u << 16);       // CONFIG_NEXT: AS0, flushes, prio
+    wr32(JS1 + 0x60, 1);                                        // COMMAND_NEXT START
+    u64 t0 = now();
+    u32 raw = 0;
+    while (now() - t0 < TB_HZ / 10) {
+        raw = srd(JOBCTRL + 0x000, 0);
+        if (raw & (1u << 1 | 1u << 17))
+            break;
+    }
+    kvh("  JOB_IRQ_RAW ", raw, "  us ", (now() - t0) * 1000000 / TB_HZ);
+    kvh("  JS1 status ", srd(JS1 + 0x24, 0), "  hdr status ", rd32(GPU_JOB + 0x00));
+    kvh("  AS0 fault ", srd(AS0 + 0x1c, 0), "  addr ", srd(AS0 + 0x20, 0));
+    u32 got = rd32(GPU_DST);
+    kvh("  memory ", got, "  want ", 0xc0ffee42);
+    color(got == 0xc0ffee42 ? OK : BAD);
+    puts_(got == 0xc0ffee42 ? "  GPU EXECUTED A JOB\n" : "  job did not write\n");
+}
+
 static void gpu_test(void)
 {
     u32 f;
@@ -1975,7 +2053,7 @@ static void gpu_test(void)
     kvh("  PMU G3D conf ", srd(PMU_G3D, 0), "  status ", srd(PMU_G3D + 4, &f));
     kvh("  CMU_G3D mux ", srd(CMU_G3D + 0x100, &f), "  fault ", f);
     kvh("  PLL_CON0 ", srd(CMU_G3D + 0x140, 0), "  PLL_CON2 ", srd(CMU_G3D + 0x148, 0));
-    mali_regs("before power-up:");
+    // (pre-power-up register dump dropped: probe #1 showed G3D already on)
 
     if ((srd(PMU_G3D + 4, 0) & 0xf) != 0xf) {
         // Samsung's sequence. PLL output only if the PLL is enabled (bit 31)
@@ -1997,7 +2075,6 @@ static void gpu_test(void)
     }
     u64 r = smc4(0x82000410UL, 1, 0x17410204UL, 2);
     kvh("  TZPC restore smc ", r, "", 0);
-    mali_regs("after power-up:");
 
     // Power up L2, tiler and shader cores (Bifrost: *_PWRON_LO at 0x1a0/0x190/0x180)
     u32 sp = srd(MALI + 0x100, &f), tp = srd(MALI + 0x110, 0), lp = srd(MALI + 0x120, 0);
@@ -2011,6 +2088,8 @@ static void gpu_test(void)
         color(srd(MALI + 0x140, 0) == sp ? OK : BAD);
         puts_(srd(MALI + 0x140, 0) == sp ? "  ALL SHADER CORES READY\n" : "  cores not ready\n");
     }
+    if (srd(MALI + 0x140, 0) == sp)
+        gpu_first_job();
 }
 #endif
 
