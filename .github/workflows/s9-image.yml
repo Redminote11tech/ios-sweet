@@ -1,0 +1,95 @@
+name: s9-image
+
+# Packages a Galaxy S9 (Exynos 9810) shim image from an xnu kernel build:
+# S9 ADT (s9/tools/mkadt_s9.py) + kernel -> payload (tools/mkpayload.py) ->
+# shim with the payload linked in (s9/shim/build.sh) -> xnu-Image.
+#
+# Download the "s9-xnu-image" artifact from this run, then on your PC:
+#   python3 s9/shim/repack.py BOOT.img xnu-Image shim-boot.img
+# The same files are also pushed to the s9-builds branch.
+
+on:
+  workflow_run:
+    workflows: [xnu]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: xnu workflow run to package (empty = latest successful)
+        default: ""
+      cmdline:
+        description: XNU boot-args
+        default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
+
+jobs:
+  package:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the xnu run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id="${{ inputs.run_id }}"
+          [ -n "$id" ] || id="${{ github.event.workflow_run.id }}"
+          [ -n "$id" ] || id=$(gh run list -R "$GITHUB_REPOSITORY" -w xnu -s success -L 1 --json databaseId -q '.[0].databaseId')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "xnu run: $id"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xnu-kernel
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+          path: kernel
+
+      - name: Tools
+        run: sudo apt-get install -y -q clang lld llvm
+
+      - name: Build
+        run: |
+          ls -la kernel
+          K=kernel/kernel.development.sweet
+          [ -f "$K" ] || K=$(ls kernel/kernel.* | grep -v '\.' | head -1)
+          python3 s9/tools/mkadt_s9.py s9.adt --dump > s9-adt.txt
+          python3 tools/mkpayload.py "$K" s9.adt payload.bin --cmdline "$CMDLINE" | tee payload.txt
+          sh s9/shim/build.sh payload.bin
+          mkdir -p dist
+          cp s9/shim/xnu-Image s9/shim/t2-Image s9/shim/t0-Image s9.adt s9-adt.txt payload.txt dist/
+          cp "$K" dist/
+          echo "xnu run ${{ steps.run.outputs.id }}, commit $GITHUB_SHA" > dist/BUILD.txt
+          echo "cmdline: $CMDLINE" >> dist/BUILD.txt
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+
+      - name: Host test of the loader
+        run: |
+          cd s9/shim
+          python3 mkdtb.py
+          cc -DHOST -O1 -Wall -o test_host test_host.c main.c
+          ./test_host ../../payload.bin | tee ../../dist/loader-test.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s9-xnu-image
+          path: dist/
+
+      - name: Push to the s9-builds branch
+        run: |
+          cd dist
+          git init -q
+          git checkout -q -b s9-builds
+          git add -A
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            commit -q -m "s9 image from xnu run ${{ steps.run.outputs.id }} ($GITHUB_SHA)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" s9-builds
