@@ -11,7 +11,7 @@ For the Snapdragon S9 (SM-G9600), see the separate [ios-s9](https://github.com/s
 | 1. Recon | hardware facts, EFS backup | done |
 | 2. Boot shim | shim draws on the S9 screen | done (T0, T2) |
 | 3. XNU core | XNU console text on the S9 screen | done (PID 1 from a RAM disk) |
-| 4. UFS + iOS root | Apple launchd from internal flash | in progress: shim reads the GPT; XNU driver (0086) |
+| 4. UFS + iOS root | Apple launchd from internal flash | in progress: XNU reads USERDATA (0086); iOS root image next |
 | 5. iOS services | SpringBoard lock screen | not started |
 | 6. Touch + buttons | unlock by swiping | not started |
 
