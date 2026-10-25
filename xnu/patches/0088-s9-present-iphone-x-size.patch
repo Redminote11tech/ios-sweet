@@ -1,0 +1,40 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -170,16 +170,34 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	/*
++	 * Present the iPhone X size whatever the panel: a presented size other
++	 * than the canvas size (/arm-io/disp0) makes backboardd look for the
++	 * hardware scaler (AppleM2ScalerCSCDriver) forever and never draw.
++	 * Smaller panels (Redmi 1080x2400) show the centred part of it; larger
++	 * panels (Galaxy S9 1440x2960) show it centred with a black border.
++	 */
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	fOffX = ((int32_t)fLogicalW - (int32_t)fWidth) / 2;
++	fOffY = ((int32_t)fLogicalH - (int32_t)fHeight) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	/*
++	 * Panel larger than the presented size (S9): the default surface is the
++	 * centred presented-size window of the panel memory (IOSurfaceOffset +
++	 * panel stride), so backboardd sees one display size everywhere.
++	 * fPixels stays the start of the panel memory.
++	 */
++	if (fSurface != NULL && fOffX <= 0 && fOffY <= 0 && (fOffX < 0 || fOffY < 0)) {
++		fSurface->width = fLogicalW;
++		fSurface->height = fLogicalH;
++		fSurface->offset = (uint32_t)(-fOffY) * fRowBytes + (uint32_t)(-fOffX) * 4;
++	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
