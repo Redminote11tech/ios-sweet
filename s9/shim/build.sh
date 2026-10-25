@@ -45,6 +45,10 @@ link t5-Image out/nopayload.o
 # t6: buttons + touchscreen I2C probe
 clang $CFLAGS -DINPUTTEST -c main.c -o out/main.o
 link t6-Image out/nopayload.o
+
+# t7: Mali-G72 power-up and ID probe
+clang $CFLAGS -DGPUTEST -c main.c -o out/main.o
+link t7-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

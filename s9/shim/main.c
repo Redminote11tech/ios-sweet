@@ -1915,6 +1915,105 @@ static void input_test(void)
 }
 #endif
 
+
+// ---------------------------------------------------------------- GPU probe (t7)
+// Mali-G72 (Bifrost) at 0x17500000. Power-up as Samsung's 9810 PMUCAL
+// (flexpmu_cal_local_exynos9810.h embedded_g3d_on): CMU_G3D 0x17400000 PLL /
+// mux, PMU EMBEDDED_G3D_CONFIGURATION 0x14064040 = 0xF, wait STATUS 0x14064044,
+// then the DTZPC restore SMC (0x82000410, WAKEUP_PD_DOWN, 0x17410204, group 2)
+// that opens the block to non-secure software. All accesses fault-tolerant.
+#ifdef GPUTEST
+#define CMU_G3D 0x17400000UL
+#define PMU_G3D 0x14064040UL
+#define MALI    0x17500000UL
+
+static u64 smc4(u64 a0, u64 a1, u64 a2, u64 a3)
+{
+    register u64 x0 __asm__("x0") = a0;
+    register u64 x1 __asm__("x1") = a1;
+    register u64 x2 __asm__("x2") = a2;
+    register u64 x3 __asm__("x3") = a3;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+                     "x14", "x15", "x16", "x17", "memory");
+    return x0;
+}
+
+static u32 srd(u64 a, u32 *fault)
+{
+    safe_faults = 0;
+    u32 v = safe_rd32(a);
+    if (fault)
+        *fault = safe_faults;
+    return v;
+}
+
+static void mali_regs(const char *when)
+{
+    u32 f;
+    color(HEAD);
+    puts_(when);
+    putch('\n');
+    u32 id = srd(MALI + 0x000, &f);
+    kvh("  GPU_ID ", id, "  fault ", f);
+    if (f)
+        return;
+    kvh("  L2 ", srd(MALI + 0x004, 0), "  TILER ", srd(MALI + 0x00c, 0));
+    kvh("  MEM ", srd(MALI + 0x010, 0), "  MMU ", srd(MALI + 0x014, 0));
+    kvh("  AS_PRESENT ", srd(MALI + 0x018, 0), "  JS_PRESENT ", srd(MALI + 0x01c, 0));
+    kvh("  STATUS ", srd(MALI + 0x034, 0), "  IRQ_RAW ", srd(MALI + 0x020, 0));
+    kvh("  SHADER_PRESENT ", srd(MALI + 0x100, 0), "  L2_PRESENT ", srd(MALI + 0x120, 0));
+    kvh("  TILER_PRESENT ", srd(MALI + 0x110, 0), "  SHADER_READY ", srd(MALI + 0x140, 0));
+    kvh("  L2_READY ", srd(MALI + 0x160, 0), "  TILER_READY ", srd(MALI + 0x150, 0));
+}
+
+static void gpu_test(void)
+{
+    u32 f;
+    color(HEAD);
+    puts_("GPU probe (t7) Mali-G72\n");
+    kvh("  PMU G3D conf ", srd(PMU_G3D, 0), "  status ", srd(PMU_G3D + 4, &f));
+    kvh("  CMU_G3D mux ", srd(CMU_G3D + 0x100, &f), "  fault ", f);
+    kvh("  PLL_CON0 ", srd(CMU_G3D + 0x140, 0), "  PLL_CON2 ", srd(CMU_G3D + 0x148, 0));
+    mali_regs("before power-up:");
+
+    if ((srd(PMU_G3D + 4, 0) & 0xf) != 0xf) {
+        // Samsung's sequence. PLL output only if the PLL is enabled (bit 31)
+        // and locked (bit 29); else the GPU stays on OSCCLK (26 MHz).
+        u32 pll = srd(CMU_G3D + 0x140, &f);
+        if (!f && (pll & (1u << 31)) && (pll & (1u << 29))) {
+            safe_wr32(CMU_G3D + 0x148, 0x30000003);
+            safe_wr32(CMU_G3D + 0x140, pll | 1u << 4);
+            safe_wr32(CMU_G3D + 0x100, srd(CMU_G3D + 0x100, 0) | 1u << 4);
+            puts_("  clock: PLL_G3D\n");
+        } else {
+            puts_("  clock: OSCCLK (PLL off)\n");
+        }
+        safe_wr32(PMU_G3D, (srd(PMU_G3D, 0) & ~0xfu) | 0xf);
+        u64 t0 = now();
+        while ((srd(PMU_G3D + 4, 0) & 0xf) != 0xf && now() - t0 < TB_HZ / 10)
+            ;
+        kvh("  power on: status ", srd(PMU_G3D + 4, 0), "  ms ", (now() - t0) * 1000 / TB_HZ);
+    }
+    u64 r = smc4(0x82000410UL, 1, 0x17410204UL, 2);
+    kvh("  TZPC restore smc ", r, "", 0);
+    mali_regs("after power-up:");
+
+    // Power up L2, tiler and shader cores (Bifrost: *_PWRON_LO at 0x1a0/0x190/0x180)
+    u32 sp = srd(MALI + 0x100, &f), tp = srd(MALI + 0x110, 0), lp = srd(MALI + 0x120, 0);
+    if (!f && sp && sp != 0xdeadbeef) {
+        safe_wr32(MALI + 0x1a0, lp);
+        wait_ticks(TB_HZ / 100);
+        safe_wr32(MALI + 0x190, tp);
+        safe_wr32(MALI + 0x180, sp);
+        wait_ticks(TB_HZ / 20);
+        mali_regs("cores on:");
+        color(srd(MALI + 0x140, 0) == sp ? OK : BAD);
+        puts_(srd(MALI + 0x140, 0) == sp ? "  ALL SHADER CORES READY\n" : "  cores not ready\n");
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -1936,6 +2035,14 @@ void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 {
     rect(0, 0, FB_W, FB_H, BG);
+#ifdef GPUTEST
+    gpu_test();
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+    for (;;)
+        __asm__ volatile("wfe");
+#endif
 #ifdef INPUTTEST
     input_test();
     color(HEAD);
