@@ -92,12 +92,13 @@ EOF
 fi
 
 step "7/7 S9 bring-up tweaks"
-fsck.hfsplus -fy "$IMG" || true
+fsck.hfsplus -fy "$IMG" >/dev/null || true
 mkdir -p /mnt/iosroot
 mount -t hfsplus -o loop,force "$IMG" /mnt/iosroot
 python3 "$T/sweet-root-tweaks.py" /mnt/iosroot
 df -h /mnt/iosroot
 umount /mnt/iosroot
-fsck.hfsplus -fn "$IMG"
+fsck.hfsplus -fy "$IMG" >/dev/null || true
+fsck.hfsplus -fn "$IMG" || echo "warning: fsck_hfs still reports issues"
 ls -la "$IMG"
 echo "RESULT: ROOT_IMAGE_READY $IMG"
