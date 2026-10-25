@@ -1,0 +1,47 @@
+name: wsl-kernel
+
+# Microsoft's WSL2 kernel with HFS+ built in (the stock one has no hfsplus
+# module), so s9/windows/build-ios-root.sh can mount the iOS root image.
+# Output: bzImage pushed to the wsl-kernel branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: WSL2-Linux-Kernel branch
+        default: linux-msft-wsl-6.6.y
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Tools
+        run: sudo apt-get install -y -q build-essential flex bison dwarves libssl-dev libelf-dev bc python3 cpio
+      - name: Source
+        run: git clone -q --depth 1 -b "${{ inputs.branch || 'linux-msft-wsl-6.6.y' }}" https://github.com/microsoft/WSL2-Linux-Kernel k
+      - name: Config
+        run: |
+          cd k
+          cp Microsoft/config-wsl .config
+          # built in, not modules: a custom kernel can't load the stock modules
+          for o in HFSPLUS_FS HFS_FS FUSE_FS CUSE BLK_DEV_LOOP; do
+            ./scripts/config --enable $o
+          done
+          make olddefconfig
+          grep -E "CONFIG_(HFSPLUS_FS|FUSE_FS|BLK_DEV_LOOP|MODULES)=" .config
+      - name: Build
+        run: |
+          cd k
+          make -j"$(nproc)" bzImage 2>&1 | tail -5
+          ls -la arch/x86/boot/bzImage
+      - name: Push to the wsl-kernel branch
+        run: |
+          mkdir out && cp k/arch/x86/boot/bzImage out/
+          (cd k && git log -1 --format='%H %s' && make -s kernelrelease) > out/VERSION.txt
+          cd out
+          git init -q && git checkout -q -b wsl-kernel && git add -A
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -q -m "WSL kernel with HFS+"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" wsl-kernel
