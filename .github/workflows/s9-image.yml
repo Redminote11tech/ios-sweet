@@ -17,16 +17,19 @@ on:
       run_id:
         description: xnu workflow run to package (empty = latest successful)
         default: ""
+      ramdisk:
+        description: "RAM disk root: init (tools/sweet-init as /sbin/launchd, add rd=md0) or none"
+        default: "init"
       cmdline:
         description: XNU boot-args
-        default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress startup_debug=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
+        default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
 
 permissions:
   contents: write
   actions: read
 
 env:
-  CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress startup_debug=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
+  CMDLINE: ${{ inputs.cmdline || 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin' }}
 
 jobs:
   package:
@@ -66,13 +69,21 @@ jobs:
             K=kernel/kernel.development.sweet
             [ -f "$K" ] || K=$(ls kernel/kernel.development.* | grep -v dSYM | head -1)
             python3 s9/tools/mkadt_s9.py s9.adt --dump > dist/s9-adt.txt
-            python3 tools/mkpayload.py "$K" s9.adt payload.bin --cmdline "$CMDLINE" | tee dist/payload.txt
+            RD=""
+            if [ "${{ inputs.ramdisk || 'init' }}" = init ]; then
+              # mockfs serves the RAM disk itself as /sbin/launchd (patches 0021/0024)
+              clang -target arm64-apple-ios16.0 -c tools/sweet-init.S -o sweet-init.o
+              python3 tools/mkinit.py sweet-init.o sweet-init
+              RD="--ramdisk sweet-init"
+            fi
+            python3 tools/mkpayload.py "$K" s9.adt payload.bin --cmdline "$CMDLINE" $RD | tee dist/payload.txt
             sh s9/shim/build.sh payload.bin
             cp s9/shim/xnu-Image s9/shim/t2-Image s9/shim/t0-Image s9.adt dist/
             cp "$K" dist/
           } 2>&1 | tee dist/build.log
           echo "xnu run ${{ steps.run.outputs.id }}, commit $GITHUB_SHA" > dist/BUILD.txt
           echo "cmdline: $CMDLINE" >> dist/BUILD.txt
+          echo "ramdisk: ${{ inputs.ramdisk || 'init' }}" >> dist/BUILD.txt
 
       - name: Host test of the loader
         run: |
