@@ -1,6 +1,6 @@
 #!/bin/bash
 # Writes /root/ios-root/ios16-root.img to the S9's USERDATA partition through
-# TWRP (adb exec-in), then checks the first 4 MiB and the HFS+ signature.
+# TWRP (adb exec-in), then checks the first 4 MiB and the HFS+ (H+) or case-sensitive HFSX (HX) signature.
 # ERASES USERDATA. Run by flash-ios-root.bat.
 set -euo pipefail
 IMG=/root/ios-root/ios16-root.img
@@ -20,7 +20,7 @@ sig=$("$ADB" exec-out "dd if=$DEV bs=1024 skip=1 count=1 2>/dev/null" | head -c 
 echo "first 4 MiB: image $want"
 echo "              phone $got"
 echo "volume signature: $sig"
-if [ "$want" = "$got" ] && [ "$sig" = "H+" ]; then
+if [ "$want" = "$got" ] && { [ "$sig" = "H+" ] || [ "$sig" = "HX" ]; }; then
 	echo "RESULT: USERDATA_WRITTEN_OK"
 else
 	echo "RESULT: VERIFY_FAILED"
