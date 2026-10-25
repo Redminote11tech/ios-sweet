@@ -58,33 +58,43 @@ jobs:
 
       - name: Build
         run: |
-          ls -la kernel
-          K=kernel/kernel.development.sweet
-          [ -f "$K" ] || K=$(ls kernel/kernel.* | grep -v '\.' | head -1)
-          python3 s9/tools/mkadt_s9.py s9.adt --dump > s9-adt.txt
-          python3 tools/mkpayload.py "$K" s9.adt payload.bin --cmdline "$CMDLINE" | tee payload.txt
-          sh s9/shim/build.sh payload.bin
           mkdir -p dist
-          cp s9/shim/xnu-Image s9/shim/t2-Image s9/shim/t0-Image s9.adt s9-adt.txt payload.txt dist/
-          cp "$K" dist/
+          set -o pipefail
+          {
+            set -ex
+            ls -la kernel
+            K=kernel/kernel.development.sweet
+            [ -f "$K" ] || K=$(ls kernel/kernel.development.* | grep -v dSYM | head -1)
+            python3 s9/tools/mkadt_s9.py s9.adt --dump > dist/s9-adt.txt
+            python3 tools/mkpayload.py "$K" s9.adt payload.bin --cmdline "$CMDLINE" | tee dist/payload.txt
+            sh s9/shim/build.sh payload.bin
+            cp s9/shim/xnu-Image s9/shim/t2-Image s9/shim/t0-Image s9.adt dist/
+            cp "$K" dist/
+          } 2>&1 | tee dist/build.log
           echo "xnu run ${{ steps.run.outputs.id }}, commit $GITHUB_SHA" > dist/BUILD.txt
           echo "cmdline: $CMDLINE" >> dist/BUILD.txt
-          (cd dist && sha256sum * > SHA256SUMS)
-          ls -la dist
 
       - name: Host test of the loader
         run: |
+          set -o pipefail
           cd s9/shim
           python3 mkdtb.py
-          cc -DHOST -O1 -Wall -o test_host test_host.c main.c
-          ./test_host ../../payload.bin | tee ../../dist/loader-test.txt
+          cc -DHOST -O1 -Wall -o test_host test_host.c main.c 2>&1 | tee ../../dist/loader-test.txt
+          ./test_host ../../payload.bin 2>&1 | tee -a ../../dist/loader-test.txt
+
+      - name: Checksums
+        if: always()
+        run: (cd dist && sha256sum * > SHA256SUMS; ls -la)
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: s9-xnu-image
           path: dist/
 
+      # Also when a step failed: build.log is how a failure gets diagnosed.
       - name: Push to the s9-builds branch
+        if: always()
         run: |
           cd dist
           git init -q
