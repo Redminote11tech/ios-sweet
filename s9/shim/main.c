@@ -751,6 +751,7 @@ static u64 rle64(const u8 *p) { u64 v = 0; for (int i = 7; i >= 0; i--) v = v <<
 
 // One SCSI command (read direction or no data) in slot 0. 0 = success.
 static u32 ufs_lun;                         // UPIU LUN for the next ufs_scsi()
+static int ufs_write_dir;                   // next ufs_scsi() sends data to the device
 
 static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u32 *st)
 {
@@ -758,7 +759,7 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
     zero(&utrl[0], sizeof(utrl[0]));
     zero(&ucd_buf, sizeof(struct ucd));
     ucd_buf.cmd[0] = 0x01;                  // COMMAND UPIU
-    ucd_buf.cmd[1] = len ? 0x40 : 0x00;     // R
+    ucd_buf.cmd[1] = len ? (ufs_write_dir ? 0x20 : 0x40) : 0x00;   // W / R
     ucd_buf.cmd[2] = ufs_lun;               // 0 = LUN 0, 0xd0 = UFS device W-LUN
     ucd_buf.cmd[3] = ++tag;
     ucd_buf.cmd[12] = len >> 24;
@@ -770,7 +771,8 @@ static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u3
 
     u64 ucd_pa = (u64)&ucd_buf;
     u32 unit = ufs_bytes ? 1 : 4;
-    utrl[0].dw0 = (ufs_ct << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);
+    // data direction: 1 = memory to device, 2 = device to memory
+    utrl[0].dw0 = (ufs_ct << 28) | ((len ? (ufs_write_dir ? 1u : 2u) : 0u) << 25) | (1u << 24);
     utrl[0].dw2 = 0x0f;
     utrl[0].ucdba = (u32)ucd_pa;
     utrl[0].ucdbau = (u32)(ucd_pa >> 32);
@@ -1075,6 +1077,7 @@ static void __attribute__((unused)) ufs_probe(void)
     if (esz != 128 || nent > 128 || ufs_read(elba, (nent * 128 + UFS_BLOCK - 1) / UFS_BLOCK, gpt_ents))
         return;
     // The partitions that matter later, with their 4K block ranges.
+    u64 ud_first = 0, ud_last = 0;
     for (u32 i = 0; i < nent; i++) {
         const u8 *e = gpt_ents + i * 128;
         u64 first = rle64(e + 32), last = rle64(e + 40);
@@ -1087,6 +1090,10 @@ static void __attribute__((unused)) ufs_probe(void)
         if (!(name[0] == 'U' && name[1] == 'S') && !(name[0] == 'B' && name[1] == 'O') &&
             !(name[0] == 'S' && name[1] == 'Y'))
             continue;                       // USERDATA, BOOT, SYSTEM only
+        if (name[0] == 'U' && name[1] == 'S' && name[2] == 'E' && name[3] == 'R') {
+            ud_first = first;
+            ud_last = last;
+        }
         color(FG);
         puts_("  ");
         puts_(name);
@@ -1100,6 +1107,53 @@ static void __attribute__((unused)) ufs_probe(void)
         dec((last - first + 1) >> 8);
         putch('\n');
     }
+
+    // Probe #8: WRITE test. XNU's persistent log never reached USERDATA, so
+    // check the write path alone: 2 blocks (2 PRDT entries) at the very end of
+    // USERDATA, the kernel log area, far behind the 16 GiB iOS volume at its
+    // start. Write a pattern, SYNCHRONIZE CACHE, read back into another buffer.
+    color(HEAD);
+    puts_("UFS write test (end of USERDATA)\n");
+    if (!ud_last || ud_last - ud_first < 0x100000) {
+        color(BAD);
+        puts_("  USERDATA not found: skip\n");
+        return;
+    }
+    u32 wlba = (u32)(ud_last - 1);
+    u8 *wbuf = ufs_data, *rbuf = gpt_ents;
+    static u32 seq;
+    seq++;
+    for (u32 i = 0; i < 2 * UFS_BLOCK; i++)
+        wbuf[i] = (u8)(i * 7 + seq + (i >> 12));
+    const char tag[] = "S9WRTEST";
+    for (int i = 0; i < 8; i++)
+        wbuf[i] = tag[i];
+    kvh("  lba ", wlba, "  of last ", (u32)ud_last);
+    u8 wr10[10] = { 0x2a, 0, wlba >> 24, wlba >> 16, wlba >> 8, wlba, 0, 0, 2, 0 };
+    ufs_write_dir = 1;
+    rc = ufs_scsi(wr10, 10, wbuf, 2 * UFS_BLOCK, &ocs, &st);
+    ufs_write_dir = 0;
+    kvh("  WRITE rc ", rc, "  ocs/st ", ocs << 8 | st);
+    if (rc)
+        ufs_sense();
+    static const u8 sync10[10] = { 0x35 };
+    u32 rc2 = ufs_scsi(sync10, 10, 0, 0, &ocs, &st);
+    kvh("  SYNC rc ", rc2, "  ocs/st ", ocs << 8 | st);
+    zero(rbuf, 2 * UFS_BLOCK);
+    u8 rd2[10] = { 0x28, 0, wlba >> 24, wlba >> 16, wlba >> 8, wlba, 0, 0, 2, 0 };
+    u32 rc3 = ufs_scsi(rd2, 10, rbuf, 2 * UFS_BLOCK, &ocs, &st);
+    u32 bad = 0, first_bad = 0xffffffff;
+    for (u32 i = 0; i < 2 * UFS_BLOCK; i++)
+        if (rbuf[i] != wbuf[i]) {
+            if (first_bad == 0xffffffff)
+                first_bad = i;
+            bad++;
+        }
+    kvh("  READBACK rc ", rc3, "  bad bytes ", bad);
+    if (bad)
+        kvh("  first bad at ", first_bad, "  got/want ", (u32)rbuf[first_bad] << 8 | wbuf[first_bad]);
+    color(!rc && !rc3 && !bad ? OK : BAD);
+    puts_(!rc && !rc3 && !bad ? "  WRITE PATH OK\n" : "  WRITE PATH BROKEN\n");
 }
 #endif
 
