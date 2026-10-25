@@ -1,0 +1,2 @@
+a07f9ea8a99139913acbcc1c160b132cb2a49c81 WSL Kernel 6.6.123.2 (#256)
+6.6.123.2-microsoft-standard-WSL2+
