@@ -1,0 +1,625 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/s9_input.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+--- /dev/null
++++ b/bsd/dev/s9_input.c
+@@ -0,0 +1,533 @@
++/*
++ * Galaxy S9 (Exynos 9810) buttons and touch screen, for the SWEET HID
++ * services (iokit/Kernel/arm/hid/SweetHID.cpp). Enabled by the ADT node
++ * /s9-input (s9/tools/mkadt_s9.py); boot-arg s9input=0 disables it.
++ *
++ * Everything here was measured with the s9/shim input probe (t6):
++ *
++ *  Buttons   gpio-keys on the alive pin controller 0x14050000, active low:
++ *            gpa0 (+0x20, DAT +0x24) bit 3 vol+, bit 4 vol-, bit 6 Bixby;
++ *            gpa2 (+0x60, DAT +0x64) bit 4 power. Polled every 20 ms.
++ *            Bixby is reported as Home.
++ *
++ *  Touch     Samsung S6SY761 at I2C 0x48 (device ID ac 37 61). Its supplies
++ *            are off after S-Boot: S2MPS18 LDO35 (tsp_io, reg 0x6c) and LDO43
++ *            (tsp_avdd, reg 0x74) are switched on over the SPEEDY bus
++ *            (0x141C0000, PMIC block = device 1), enable bits 7:6 only.
++ *            The hsi2c10 controller (0x104B0000) does not complete transfers
++ *            yet, so the bus is bit-banged on its pins gpp1-4 SCL / gpp1-5
++ *            SDA (pin controller 0x10430000), open drain emulated by
++ *            switching between input and output-0. ~100 kHz.
++ *            Protocol as Linux drivers/input/touchscreen/s6sy761.c.
++ *            Attention line gpa1-0 (active low) gates the polling.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_key(int key, int down);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void s9_input_init(void);
++
++#define S9_PIN_ALIVE    0x14050000u
++#define S9_PIN_PERIC0   0x10430000u
++#define S9_SPEEDY       0x141c0000u
++
++#define ALIVE_GPA0_DAT  0x24u
++#define ALIVE_GPA1_DAT  0x44u
++#define ALIVE_GPA2_DAT  0x64u
++#define GPP1_CON        0x20u
++#define GPP1_DAT        0x24u
++#define GPP1_PUD        0x28u
++#define BB_SCL          4u
++#define BB_SDA          5u
++
++#define SP_CTRL         0x000u
++#define SP_FIFO_CTRL    0x004u
++#define SP_CMD          0x008u
++#define SP_INT_EN       0x00cu
++#define SP_INT_ST       0x010u
++#define SP_TX           0x034u
++#define SP_RX           0x038u
++
++#define TS_ADDR         0x48u
++#define TS_SENSE_ON     0x10u
++#define TS_TOUCH_FUNC   0x30u
++#define TS_FW_INTEGRITY 0x21u
++#define TS_PANEL_INFO   0x23u
++#define TS_DEVICE_ID    0x52u
++#define TS_BOOT_STATUS  0x55u
++#define TS_READ_ONE     0x60u
++#define TS_READ_ALL     0x61u
++#define TS_CLEAR_STACK  0x62u
++#define TS_EVENT_SIZE   8u
++#define TS_EVENT_COUNT  32u
++#define TS_FINGERS      10u
++
++static vm_offset_t s9_alive, s9_peric0, s9_speedy;
++static bool s9_started;
++static int s9_chan;
++
++static inline uint32_t
++rd(vm_offset_t b, uint32_t o)
++{
++	return *(volatile uint32_t *)(b + o);
++}
++
++static inline void
++wr(vm_offset_t b, uint32_t o, uint32_t v)
++{
++	*(volatile uint32_t *)(b + o) = v;
++}
++
++static void
++s9_sleep_ms(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&s9_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* ---------------------------------------------------------------- buttons */
++
++static void
++s9_keys_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	/* sweet_hid_key: 0 power, 1 volume up, 2 volume down, 3 home */
++	int state[4] = {0, 0, 0, 0};
++	for (;;) {
++		uint32_t a0 = rd(s9_alive, ALIVE_GPA0_DAT), a2 = rd(s9_alive, ALIVE_GPA2_DAT);
++		int now[4] = {
++			!((a2 >> 4) & 1),       /* power */
++			!((a0 >> 3) & 1),       /* vol+ */
++			!((a0 >> 4) & 1),       /* vol- */
++			!((a0 >> 6) & 1),       /* Bixby as Home */
++		};
++		for (int k = 0; k < 4; k++) {
++			if (now[k] != state[k]) {
++				state[k] = now[k];
++				printf("S9 KEYS: key=%d down=%d\n", k, state[k]);
++				sweet_hid_key(k, state[k]);
++			}
++		}
++		s9_sleep_ms(20);
++	}
++}
++
++/* ---------------------------------------------------------------- SPEEDY */
++
++static void
++sp_prep(void)
++{
++	wr(s9_speedy, SP_FIFO_CTRL, rd(s9_speedy, SP_FIFO_CTRL) | 1u << 31);
++	delay(10);
++	wr(s9_speedy, SP_FIFO_CTRL, rd(s9_speedy, SP_FIFO_CTRL) | 1u | 1u << 8);
++	wr(s9_speedy, SP_INT_ST, 0xffffffffu);
++	delay(10);
++}
++
++static int
++sp_wait(void)
++{
++	for (int i = 0; i < 5000; i++) {        /* 50 ms */
++		if (rd(s9_speedy, SP_INT_ST) & 1u) {
++			return 0;
++		}
++		delay(10);
++	}
++	return -1;
++}
++
++static int
++speedy_read(uint32_t dev, uint32_t reg)
++{
++	sp_prep();
++	wr(s9_speedy, SP_INT_EN, 1u | 1u << 8 | 1u << 9 | 7u << 16 | 1u << 31);
++	wr(s9_speedy, SP_CMD, 1u << 19 | (dev & 0xfu) << 15 | (reg & 0xffu) << 7);
++	if (sp_wait()) {
++		return -1;
++	}
++	uint32_t v = rd(s9_speedy, SP_RX);
++	wr(s9_speedy, SP_INT_ST, 0xffffffffu);
++	return (int)(v & 0xffu);
++}
++
++static int
++speedy_write(uint32_t dev, uint32_t reg, uint32_t val)
++{
++	sp_prep();
++	wr(s9_speedy, SP_INT_EN, 1u | 1u << 4 | 1u << 20 | 1u << 21 | 1u << 31);
++	wr(s9_speedy, SP_CMD, 1u << 19 | 1u << 20 | (dev & 0xfu) << 15 | (reg & 0xffu) << 7);
++	wr(s9_speedy, SP_TX, val & 0xffu);
++	int r = sp_wait();
++	wr(s9_speedy, SP_INT_ST, 0xffffffffu);
++	return r;
++}
++
++/* Switch on LDO35 and LDO43 (enable bits 7:6), voltage bits untouched. */
++static bool
++s9_touch_power(void)
++{
++	if (!(rd(s9_speedy, SP_CTRL) & 1u)) {
++		wr(s9_speedy, SP_INT_ST, 0xffffffffu);
++		wr(s9_speedy, SP_CTRL, rd(s9_speedy, SP_CTRL) | 1u << 31);
++		s9_sleep_ms(20);
++		wr(s9_speedy, SP_CTRL, rd(s9_speedy, SP_CTRL) | 1u);
++		s9_sleep_ms(20);
++	}
++	int l35 = speedy_read(1, 0x6c), l43 = speedy_read(1, 0x74);
++	printf("S9 TOUCH: PMIC L35CTRL %#x L43CTRL %#x\n", l35, l43);
++	if (l35 < 0 || l43 < 0 || !(l35 & 0x3f) || !(l43 & 0x3f)) {
++		printf("S9 TOUCH: PMIC read failed or no voltage: not switching supplies\n");
++		return false;
++	}
++	if ((l35 & 0xc0) != 0xc0) {
++		(void)speedy_write(1, 0x6c, (uint32_t)l35 | 0xc0);
++	}
++	if ((l43 & 0xc0) != 0xc0) {
++		(void)speedy_write(1, 0x74, (uint32_t)l43 | 0xc0);
++	}
++	printf("S9 TOUCH: PMIC now L35CTRL %#x L43CTRL %#x\n",
++	    speedy_read(1, 0x6c), speedy_read(1, 0x74));
++	return true;
++}
++
++/* ---------------------------------------------------------------- bit-banged I2C */
++
++static void
++bb_line(uint32_t pin, int high)
++{
++	uint32_t con = rd(s9_peric0, GPP1_CON) & ~(0xfu << (pin * 4));
++	if (!high) {
++		wr(s9_peric0, GPP1_DAT, rd(s9_peric0, GPP1_DAT) & ~(1u << pin));
++		con |= 1u << (pin * 4);         /* output, driving 0 */
++	}
++	wr(s9_peric0, GPP1_CON, con);
++}
++
++static inline int
++bb_get(uint32_t pin)
++{
++	return (int)((rd(s9_peric0, GPP1_DAT) >> pin) & 1u);
++}
++
++static inline void
++bb_delay(void)
++{
++	delay(5);
++}
++
++static int
++bb_scl_high(void)
++{
++	bb_line(BB_SCL, 1);
++	for (int i = 0; i < 2000; i++) {        /* clock stretching, ~10 ms */
++		if (bb_get(BB_SCL)) {
++			return 0;
++		}
++		delay(5);
++	}
++	return -1;
++}
++
++static void
++bb_start(void)
++{
++	bb_line(BB_SDA, 1);
++	(void)bb_scl_high();
++	bb_delay();
++	bb_line(BB_SDA, 0);
++	bb_delay();
++	bb_line(BB_SCL, 0);
++	bb_delay();
++}
++
++static void
++bb_stop(void)
++{
++	bb_line(BB_SDA, 0);
++	bb_delay();
++	(void)bb_scl_high();
++	bb_delay();
++	bb_line(BB_SDA, 1);
++	bb_delay();
++}
++
++/* 0 ACK, 1 NACK, -1 SCL held low */
++static int
++bb_write(uint32_t byte)
++{
++	for (int i = 7; i >= 0; i--) {
++		bb_line(BB_SDA, (int)((byte >> i) & 1u));
++		bb_delay();
++		if (bb_scl_high()) {
++			return -1;
++		}
++		bb_delay();
++		bb_line(BB_SCL, 0);
++	}
++	bb_line(BB_SDA, 1);
++	bb_delay();
++	if (bb_scl_high()) {
++		return -1;
++	}
++	int nack = bb_get(BB_SDA);
++	bb_delay();
++	bb_line(BB_SCL, 0);
++	bb_delay();
++	return nack;
++}
++
++static uint32_t
++bb_read(int ack)
++{
++	uint32_t v = 0;
++	bb_line(BB_SDA, 1);
++	for (int i = 0; i < 8; i++) {
++		bb_delay();
++		(void)bb_scl_high();
++		v = v << 1 | (uint32_t)bb_get(BB_SDA);
++		bb_delay();
++		bb_line(BB_SCL, 0);
++	}
++	bb_line(BB_SDA, !ack);
++	bb_delay();
++	(void)bb_scl_high();
++	bb_delay();
++	bb_line(BB_SCL, 0);
++	bb_line(BB_SDA, 1);
++	return v;
++}
++
++/* Write tx (cmd + data), then (repeated start) read rx_len bytes. 0 = ok. */
++static int
++ts_xfer(const uint8_t *tx, unsigned tx_len, uint8_t *rx, unsigned rx_len)
++{
++	int err = 0;
++	bb_start();
++	if (bb_write(TS_ADDR << 1) != 0) {
++		err = -1;
++		goto out;
++	}
++	for (unsigned i = 0; i < tx_len; i++) {
++		if (bb_write(tx[i]) != 0) {
++			err = -2;
++			goto out;
++		}
++	}
++	if (rx_len) {
++		bb_start();                     /* repeated start */
++		if (bb_write(TS_ADDR << 1 | 1) != 0) {
++			err = -3;
++			goto out;
++		}
++		for (unsigned i = 0; i < rx_len; i++) {
++			rx[i] = (uint8_t)bb_read(i + 1 < rx_len);
++		}
++	}
++out:
++	bb_stop();
++	return err;
++}
++
++static int
++ts_cmd_read(uint8_t cmd, uint8_t *rx, unsigned len)
++{
++	return ts_xfer(&cmd, 1, rx, len);
++}
++
++/* ---------------------------------------------------------------- touch */
++
++static struct {
++	unsigned max_x, max_y, panel_w, panel_h;
++	bool down[TS_FINGERS];
++	uint8_t ev[TS_EVENT_SIZE * TS_EVENT_COUNT];
++	unsigned logged;
++} ts;
++
++static void
++ts_event(const uint8_t *e)
++{
++	if ((e[0] & 0x03u) != 0) {              /* not a coordinate event */
++		return;
++	}
++	if (!(e[0] & 0x3cu)) {
++		return;
++	}
++	unsigned tid = ((e[0] & 0x3cu) >> 2) - 1;
++	unsigned state = (e[0] & 0xc0u) >> 6;
++	if (tid >= TS_FINGERS) {
++		return;
++	}
++	unsigned x = (unsigned)e[1] << 4 | (e[3] & 0xf0u) >> 4;
++	unsigned y = (unsigned)e[2] << 4 | (e[3] & 0x0fu);
++	int px = (int)(x * ts.panel_w / ts.max_x);
++	int py = (int)(y * ts.panel_h / ts.max_y);
++	if (ts.logged < 8) {
++		ts.logged++;
++		printf("S9 TOUCH: id=%u state=%u raw %u,%u -> panel %d,%d\n", tid, state, x, y, px, py);
++	}
++	if (state == 1 || state == 2) {         /* press, move */
++		ts.down[tid] = true;
++		sweet_hid_touch((int)tid, 1, px, py);
++	} else if (state == 3 && ts.down[tid]) { /* release */
++		ts.down[tid] = false;
++		sweet_hid_touch((int)tid, 0, px, py);
++	}
++}
++
++static int
++ts_poll(void)
++{
++	uint8_t *ev = ts.ev;
++	if (ts_cmd_read(TS_READ_ONE, ev, TS_EVENT_SIZE)) {
++		return -1;
++	}
++	if (!ev[0]) {
++		return 0;
++	}
++	unsigned left = ev[7] & 0x3fu;
++	if (left > TS_EVENT_COUNT - 1) {
++		return 0;
++	}
++	if (left && ts_cmd_read(TS_READ_ALL, ev + TS_EVENT_SIZE, left * TS_EVENT_SIZE)) {
++		return -1;
++	}
++	for (unsigned i = 0; i <= left; i++) {
++		if (!ev[i * TS_EVENT_SIZE]) {
++			break;
++		}
++		ts_event(ev + i * TS_EVENT_SIZE);
++	}
++	return 0;
++}
++
++static void
++s9_touch_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	unsigned delay_s = 30;
++	PE_Video video;
++
++	(void)PE_parse_boot_argn("s9touchdelay", &delay_s, sizeof(delay_s));
++	printf("S9 TOUCH: starting in %u s\n", delay_s);
++	s9_sleep_ms(delay_s * 1000u);
++
++	PE_current_console(&video);
++	ts.panel_w = video.v_width ? (unsigned)video.v_width : 1440;
++	ts.panel_h = video.v_height ? (unsigned)video.v_height : 2960;
++
++	if (!s9_touch_power()) {
++		goto out;
++	}
++	s9_sleep_ms(150);                       /* Linux s6sy761_power_on: 140 ms */
++
++	/* gpp1-4/5 released (inputs, no pulls); the bus idles high */
++	wr(s9_peric0, GPP1_PUD, rd(s9_peric0, GPP1_PUD) & ~(0xffu << 16));
++	bb_line(BB_SCL, 1);
++	bb_line(BB_SDA, 1);
++	delay(100);
++	for (int i = 0; i < 9; i++) {           /* free a slave stuck mid-byte */
++		bb_line(BB_SCL, 0);
++		bb_delay();
++		(void)bb_scl_high();
++		bb_delay();
++	}
++	bb_stop();
++
++	uint8_t id[3] = {0}, bs = 0, fw = 0, panel[11] = {0}, boot_ev[TS_EVENT_SIZE] = {0};
++	int e0 = ts_cmd_read(TS_READ_ONE, boot_ev, TS_EVENT_SIZE);
++	int e1 = ts_cmd_read(TS_DEVICE_ID, id, sizeof(id));
++	int e2 = ts_cmd_read(TS_BOOT_STATUS, &bs, 1);
++	int e3 = ts_cmd_read(TS_PANEL_INFO, panel, sizeof(panel));
++	int e4 = ts_cmd_read(TS_FW_INTEGRITY, &fw, 1);
++	printf("S9 TOUCH: boot event %02x %02x err %d, id %02x%02x%02x err %d, boot status %#x err %d, fw %#x err %d\n",
++	    boot_ev[0], boot_ev[1], e0, id[0], id[1], id[2], e1, bs, e2, fw, e4);
++	if (e1 || id[0] != 0xac) {
++		printf("S9 TOUCH: no S6SY761 at 0x48; stopping\n");
++		goto out;
++	}
++	ts.max_x = (unsigned)panel[0] << 8 | panel[1];
++	ts.max_y = (unsigned)panel[2] << 8 | panel[3];
++	if (e3 || !ts.max_x || !ts.max_y) {
++		ts.max_x = ts.max_y = 4096;     /* stock DT sec,max_coords */
++	}
++	printf("S9 TOUCH: max %u x %u, panel %u x %u, boot status %s\n", ts.max_x, ts.max_y,
++	    ts.panel_w, ts.panel_h, bs == 0x20 ? "application" : "NOT application");
++
++	uint8_t func[3] = {TS_TOUCH_FUNC, 0x01, 0x00};  /* touch only */
++	uint8_t clr = TS_CLEAR_STACK, on = TS_SENSE_ON;
++	int f1 = ts_xfer(func, 3, NULL, 0);
++	int f2 = ts_xfer(&clr, 1, NULL, 0);
++	int f3 = ts_xfer(&on, 1, NULL, 0);
++	printf("S9 TOUCH: touch function %d, clear %d, sense on %d; polling\n", f1, f2, f3);
++
++	unsigned errors = 0;
++	for (;;) {
++		bool attn = !(rd(s9_alive, ALIVE_GPA1_DAT) & 1u);
++		bool any = false;
++		for (unsigned i = 0; i < TS_FINGERS; i++) {
++			any |= ts.down[i];
++		}
++		if (attn || any) {
++			if (ts_poll()) {
++				if ((errors++ % 100u) == 0) {
++					printf("S9 TOUCH: read error (%u)\n", errors);
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		s9_sleep_ms(attn ? 5 : 10);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++s9_input_init(void)
++{
++	DTEntry node;
++	int enabled = 1;
++	thread_t thread;
++
++	if (s9_started) {
++		return;
++	}
++	s9_started = true;
++	if (SecureDTLookupEntry(NULL, "/s9-input", &node) != kSuccess) {
++		return;
++	}
++	(void)PE_parse_boot_argn("s9input", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("S9 INPUT: disabled (s9input=0)\n");
++		return;
++	}
++	s9_alive = ml_io_map(S9_PIN_ALIVE, 0x1000);
++	s9_peric0 = ml_io_map(S9_PIN_PERIC0, 0x1000);
++	s9_speedy = ml_io_map(S9_SPEEDY, 0x1000);
++	if (!s9_alive || !s9_peric0 || !s9_speedy) {
++		printf("S9 INPUT: MMIO mapping failed\n");
++		return;
++	}
++	printf("S9 INPUT: keys gpa0 %#x gpa2 %#x, touch attn %#x\n",
++	    rd(s9_alive, ALIVE_GPA0_DAT), rd(s9_alive, ALIVE_GPA2_DAT), rd(s9_alive, ALIVE_GPA1_DAT));
++	if (kernel_thread_start(s9_keys_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	int touch = 1;
++	(void)PE_parse_boot_argn("s9touch", &touch, sizeof(touch));
++	if (touch && kernel_thread_start(s9_touch_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void s9_input_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -732,6 +733,7 @@ sweet_ufs_init(void)
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++	s9_input_init();          /* Galaxy S9 keys + touch (bsd/dev/s9_input.c), /s9-input only */
+ 	return 0;
+ }
+ 
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -367,7 +367,7 @@ protected:
+ 	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 2; }
+ private:
+ 	IOLock *fLock;
+-	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fLogicalW, fLogicalH, fOffX, fOffY, fPanelW, fPanelH;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -434,10 +434,19 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	/*
++	 * Touch coordinates arrive in panel pixels; the presented display is the
++	 * iPhone X size centred on the panel (SweetFramebuffer.cpp): Redmi
++	 * 1080x2400 shows its middle, Galaxy S9 1440x2960 shows it with a border.
++	 */
++	PE_Video video;
++	PE_current_console(&video);
++	fPanelW = video.v_width ? (int)video.v_width : 1080;
++	fPanelH = video.v_height ? (int)video.v_height : 2400;
++	fLogicalW = native ? fPanelW : 1125;
++	fLogicalH = native ? fPanelH : 2436;
++	fOffX = (fLogicalW - fPanelW) / 2;
++	fOffY = (fLogicalH - fPanelH) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -458,8 +467,12 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	/* Panel pixels, clamped to the presented display's area of the panel. */
++	int x0 = fOffX < 0 ? -fOffX : 0, y0 = fOffY < 0 ? -fOffY : 0;
++	int x1 = (fOffX < 0 ? x0 + fLogicalW : fPanelW) - 1;
++	int y1 = (fOffY < 0 ? y0 + fLogicalH : fPanelH) - 1;
++	x = x < x0 ? x0 : (x > x1 ? x1 : x);
++	y = y < y0 ? y0 : (y > y1 ? y1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +485,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < x0 + SWEET_TOUCH_EDGE_PX || x > x1 - SWEET_TOUCH_EDGE_PX ||
++		    y < y0 + SWEET_TOUCH_EDGE_PX || y > y1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);

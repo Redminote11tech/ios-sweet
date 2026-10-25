@@ -153,6 +153,13 @@ def build(seed=None):
         ('exynos-vs', u64(UFS_VS, UFS_VS_SIZE)),
     ])
 
+    # Galaxy S9 buttons + S6SY761 touch (patch 0089, bsd/dev/s9_input.c):
+    # the kernel driver runs only when this node exists.
+    s9_input = node('s9-input', [
+        ph(),
+        ('compatible', cstr('samsung,starlte-input')),
+    ])
+
     return node('device-tree', [
         ph(),
         ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
@@ -163,7 +170,7 @@ def build(seed=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, ufs, buttons, pram] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, ufs, s9_input, buttons, pram] + product)
 
 
 if __name__ == '__main__':
