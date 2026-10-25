@@ -37,6 +37,10 @@ link t2-Image out/nopayload.o
 # t4: GIC-400 / architected timer interrupt test
 clang $CFLAGS -DGICTEST -c main.c -o out/main.o
 link t4-Image out/nopayload.o
+
+# t5: read-only UFS probe (S-Boot's request format, TUR, capacity, GPT)
+clang $CFLAGS -DUFSTEST -c main.c -o out/main.o
+link t5-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

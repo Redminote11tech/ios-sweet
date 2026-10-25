@@ -697,6 +697,236 @@ static void __attribute__((unused)) gic_test(void)
 void shim_irq(void) {}
 #endif
 
+
+#ifndef HOST
+// ---------------------------------------------------------------- UFS probe (t5)
+// Read-only: is the Exynos UFS host S-Boot used still running, and which
+// descriptor format does it expect? Shows S-Boot's last request (slot 0 of
+// its list), then sends TEST UNIT READY, READ CAPACITY and READ(10) of the
+// GPT on LUN 0 in the same format. There is no SCSI WRITE in this code.
+#define UFS_HCI 0x11120000UL                // standard UFSHCI registers
+#define UFS_VS  0x11121100UL                // Exynos vendor-specific HCI
+#define UFS_BLOCK 4096u
+
+static inline u32 ufs_rd(u32 off) { return *(volatile u32 *)(UFS_HCI + off); }
+static inline void ufs_wr(u32 off, u32 v) { *(volatile u32 *)(UFS_HCI + off) = v; }
+static inline u32 vs_rd(u32 off) { return *(volatile u32 *)(UFS_VS + off); }
+
+struct utrd {
+    u32 dw0, dw1, dw2, dw3, ucdba, ucdbau, resp, prdt;
+};
+
+// Command UPIU, response UPIU, then a PRDT big enough for one 128-byte
+// (Samsung FMP) entry; a standard entry uses the first 16 bytes of it.
+struct ucd {
+    u8 cmd[512];
+    u8 resp[512];
+    u32 prdt[32];
+};
+
+static struct utrd utrl[32] __attribute__((aligned(1024)));
+static struct ucd ucd_buf __attribute__((aligned(128)));
+static u8 ufs_data[2 * UFS_BLOCK] __attribute__((aligned(4096)));
+static u8 gpt_ents[128 * 128] __attribute__((aligned(4096)));
+static int ufs_bytes;                       // offsets/lengths in bytes (Exynos quirk), else DWORDs
+static u32 ufs_prdt_entry = 16;             // PRDT entry size in bytes
+
+static void zero(void *p, u32 n)
+{
+    volatile u8 *b = p;
+    for (u32 i = 0; i < n; i++)
+        b[i] = 0;
+}
+
+static u32 rbe32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
+static u64 rle64(const u8 *p) { u64 v = 0; for (int i = 7; i >= 0; i--) v = v << 8 | p[i]; return v; }
+
+// One SCSI command (read direction or no data) in slot 0. 0 = success.
+static u32 ufs_scsi(const u8 *cdb, u32 cdb_len, void *buf, u32 len, u32 *ocs, u32 *st)
+{
+    static u8 tag;
+    zero(&utrl[0], sizeof(utrl[0]));
+    zero(&ucd_buf, sizeof(ucd_buf));
+    ucd_buf.cmd[0] = 0x01;                  // COMMAND UPIU
+    ucd_buf.cmd[1] = len ? 0x40 : 0x00;     // R
+    ucd_buf.cmd[2] = 0;                     // LUN 0
+    ucd_buf.cmd[3] = ++tag;
+    ucd_buf.cmd[12] = len >> 24;
+    ucd_buf.cmd[13] = len >> 16;
+    ucd_buf.cmd[14] = len >> 8;
+    ucd_buf.cmd[15] = len;
+    for (u32 i = 0; i < cdb_len; i++)
+        ucd_buf.cmd[16 + i] = cdb[i];
+
+    u64 ucd_pa = (u64)&ucd_buf;
+    u32 unit = ufs_bytes ? 1 : 4;
+    utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);
+    utrl[0].dw2 = 0x0f;
+    utrl[0].ucdba = (u32)ucd_pa;
+    utrl[0].ucdbau = (u32)(ucd_pa >> 32);
+    utrl[0].resp = (512u / unit) << 16 | (512u / unit);
+    if (len) {
+        u64 b = (u64)buf;
+        ucd_buf.prdt[0] = (u32)b;
+        ucd_buf.prdt[1] = (u32)(b >> 32);
+        ucd_buf.prdt[3] = len - 1;
+        utrl[0].prdt = (1024u / unit) << 16 | (ufs_bytes ? ufs_prdt_entry : 1);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    ufs_wr(0x58, 1);                        // UTRLDBR slot 0
+    u64 t0 = now();
+    while (ufs_rd(0x58) & 1)
+        if (now() - t0 > TB_HZ) {           // 1 s
+            ufs_wr(0x5c, ~1u);              // UTRLCLR slot 0
+            return 1;
+        }
+    __asm__ volatile("dsb sy" ::: "memory");
+    *ocs = utrl[0].dw2 & 0xff;
+    *st = ucd_buf.resp[7];
+    if (*ocs)
+        return 2;
+    if (ucd_buf.resp[0] != 0x21)
+        return 3;
+    return *st ? 4 : 0;
+}
+
+static u32 ufs_read(u32 lba, u32 count, void *buf)
+{
+    u8 cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
+    u32 ocs, st;
+    return ufs_scsi(cdb, 10, buf, count * UFS_BLOCK, &ocs, &st);
+}
+
+static void __attribute__((unused)) ufs_probe(void)
+{
+    color(HEAD);
+    puts_("UFS probe (read-only)\n");
+    u32 cap = ufs_rd(0x00), hcs = ufs_rd(0x30), hce = ufs_rd(0x34);
+    kvh("  ver ", ufs_rd(0x08), "  cap ", cap);
+    kvh("  hce ", hce, "  hcs ", hcs);
+    kvh("  is ", ufs_rd(0x20), "  ie ", ufs_rd(0x24));
+    kvh("  utrlba ", ufs_rd(0x50), "  hi ", ufs_rd(0x54));
+    kvh("  dbr ", ufs_rd(0x58), "  rsr ", ufs_rd(0x60));
+    kvh("  vs txprdt ", vs_rd(0x00), "  rxprdt ", vs_rd(0x04));
+    kvh("  vs 0x08 ", vs_rd(0x08), "  0x0c ", vs_rd(0x0c));
+    kvh("  vs 0x10 ", vs_rd(0x10), "  0x30 ", vs_rd(0x30));
+
+    // S-Boot's own last request: slot 0 of its list (read only).
+    u64 sb_list = (u64)ufs_rd(0x50) | (u64)ufs_rd(0x54) << 32;
+    u32 sb_resp = 0, sb_prdt = 0;
+    if (sb_list && sb_list < 0x100000000UL) {
+        const volatile struct utrd *d = (const volatile struct utrd *)sb_list;
+        kvh("  sb dw0 ", d->dw0, "  dw2 ", d->dw2);
+        kvh("  sb ucd ", d->ucdba, "  hi ", d->ucdbau);
+        sb_resp = d->resp;
+        sb_prdt = d->prdt;
+        kvh("  sb resp ", sb_resp, "  prdt ", sb_prdt);
+        u64 ucd = (u64)d->ucdba | (u64)d->ucdbau << 32;
+        u32 poff = sb_prdt >> 16;
+        if (ucd && ucd < 0x100000000UL && poff) {
+            // PRDT offset as bytes and as DWORDs: one of them shows an address + count
+            const volatile u32 *pb = (const volatile u32 *)(ucd + poff);
+            const volatile u32 *pd = (const volatile u32 *)(ucd + poff * 4);
+            kvh("  prdt@B ", pb[0], " ", pb[3]);
+            kvh("  prdt@DW ", pd[0], " ", pd[3]);
+            const volatile u8 *c = (const volatile u8 *)ucd;
+            kvh("  sb cmd ", (u32)c[0] << 24 | c[1] << 16 | c[2] << 8 | c[3],
+                "  cdb ", (u32)c[16] << 24 | c[17] << 16 | c[18] << 8 | c[19]);
+        }
+    }
+    // Byte granularity if S-Boot's response offset is 512 (bytes) rather than 128 (DWORDs).
+    ufs_bytes = (sb_resp >> 16) >= 512;
+    u32 ent = vs_rd(0x00) & 0x1f;
+    if (ent >= 4 && ent <= 7)
+        ufs_prdt_entry = 1u << ent;
+    color(DIM);
+    puts_("  format: ");
+    color(FG);
+    puts_(ufs_bytes ? "bytes" : "dwords");
+    puts_(", PRDT entry ");
+    dec(ufs_prdt_entry);
+    putch('\n');
+
+    if (!(hce & 1) || !(hcs & 1) || !(hcs & 2)) {
+        color(BAD);
+        puts_("  host not enabled/ready: stop\n");
+        return;
+    }
+    if (ufs_rd(0x58)) {
+        color(BAD);
+        puts_("  requests outstanding: stop\n");
+        return;
+    }
+    // Take over the transfer request list; never ring a doorbell unless the
+    // host really uses ours (else it would run S-Boot's slot 0 again).
+    ufs_wr(0x60, 0);
+    u64 list = (u64)utrl;
+    ufs_wr(0x50, (u32)list);
+    ufs_wr(0x54, (u32)(list >> 32));
+    ufs_wr(0x60, 1);
+    if (ufs_rd(0x50) != (u32)list || ufs_rd(0x54) != (u32)(list >> 32) || !(ufs_rd(0x60) & 1)) {
+        color(BAD);
+        puts_("  list base not taken: stop\n");
+        return;
+    }
+
+    u32 ocs = 0, st = 0, rc = 1;
+    static const u8 tur[6] = { 0 };
+    for (int i = 0; i < 3 && rc; i++) {
+        rc = ufs_scsi(tur, 6, 0, 0, &ocs, &st);
+        kvh("  TUR rc ", rc, "  ocs/st ", ocs << 8 | st);
+    }
+    static const u8 cap10[10] = { 0x25 };
+    rc = ufs_scsi(cap10, 10, ufs_data, 8, &ocs, &st);
+    kvh("  CAP rc ", rc, "  ocs/st ", ocs << 8 | st);
+    if (!rc)
+        kvh("  LUN0 last lba ", rbe32(ufs_data), "  block ", rbe32(ufs_data + 4));
+
+    static const u8 rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };   // LBA 0, 2 blocks
+    rc = ufs_scsi(rd10, 10, ufs_data, 2 * UFS_BLOCK, &ocs, &st);
+    kvh("  READ rc ", rc, "  ocs/st ", ocs << 8 | st);
+    if (rc)
+        return;
+    const u8 *g = ufs_data + UFS_BLOCK;
+    color(DIM);
+    puts_("  GPT sig ");
+    color(g[0] == 'E' && g[1] == 'F' && g[2] == 'I' ? OK : BAD);
+    for (int i = 0; i < 8; i++)
+        putch(g[i] >= 32 && g[i] < 127 ? g[i] : '.');
+    putch('\n');
+    u32 nent = g[80] | g[81] << 8, esz = g[84] | g[85] << 8, elba = g[72] | g[73] << 8;
+    kvh("  entries ", nent, "  at lba ", elba);
+    if (esz != 128 || nent > 128 || ufs_read(elba, (nent * 128 + UFS_BLOCK - 1) / UFS_BLOCK, gpt_ents))
+        return;
+    // The partitions that matter later, with their 4K block ranges.
+    for (u32 i = 0; i < nent; i++) {
+        const u8 *e = gpt_ents + i * 128;
+        u64 first = rle64(e + 32), last = rle64(e + 40);
+        if (!first)
+            continue;
+        char name[13];
+        for (int c = 0; c < 12; c++)
+            name[c] = e[56 + 2 * c];
+        name[12] = 0;
+        if (!(name[0] == 'U' && name[1] == 'S') && !(name[0] == 'B' && name[1] == 'O') &&
+            !(name[0] == 'S' && name[1] == 'Y'))
+            continue;                       // USERDATA, BOOT, SYSTEM only
+        color(FG);
+        puts_("  ");
+        puts_(name);
+        color(DIM);
+        puts_(" lba ");
+        color(FG);
+        hexv(first);
+        color(DIM);
+        puts_(" MiB ");
+        color(FG);
+        dec((last - first + 1) >> 8);
+        putch('\n');
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -777,6 +1007,12 @@ void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
     kv("  CTR         ", SYSREG(ctr_el0));
     kv("  CNTFRQ      ", SYSREG(cntfrq_el0));
 
+#ifdef UFSTEST
+    ufs_probe();
+    color(HEAD);
+    puts_("\nDone. Seconds since start:\n");
+    counter((cur_y + 1) * CH + 40);
+#endif
 #ifdef GICTEST
     gic_test();
     color(HEAD);
