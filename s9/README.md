@@ -10,8 +10,8 @@ For the Snapdragon S9 (SM-G9600), see the separate [ios-s9](https://github.com/s
 | --- | --- | --- |
 | 1. Recon | hardware facts, EFS backup | done |
 | 2. Boot shim | shim draws on the S9 screen | done (T0, T2) |
-| 3. XNU core | XNU console text on the S9 screen | in progress |
-| 4. UFS + iOS root | Apple launchd from internal flash | not started |
+| 3. XNU core | XNU console text on the S9 screen | done (PID 1 from a RAM disk) |
+| 4. UFS + iOS root | Apple launchd from internal flash | in progress: shim reads the GPT; XNU driver (0086) |
 | 5. iOS services | SpringBoard lock screen | not started |
 | 6. Touch + buttons | unlock by swiping | not started |
 
@@ -31,6 +31,7 @@ For the Snapdragon S9 (SM-G9600), see the separate [ios-s9](https://github.com/s
 
 - `xnu/patches/0082-s9-gicv2.patch`: GICv2 selected at boot from `/arm-io/gic` compatible `arm,gic-400`; ack/EOI/SGI through the memory-mapped GICD/GICC.
 - `xnu/patches/0083-s9-early-fb-from-boot-args.patch`: the early console and framebuffer mapping use `boot_args->Video` instead of the Redmi's fixed panel.
+- `xnu/patches/0086-s9-exynos-ufs.patch`: Exynos UFS host quirks in `bsd/dev/sweet_ufs.c` (byte offsets, 4 KiB PRDT entries, nexus register, OCS 7, no HCE, START STOP UNIT to W-LUN 0xd0), enabled by `exynos-vs` in `/sweet-ufs`. Default partition `USERDATA`, read-only unless `ufsrw=1`.
 
 ## Building a boot image
 

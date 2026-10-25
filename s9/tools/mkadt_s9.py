@@ -32,6 +32,11 @@ TIMEBASE = 26000000
 VTIMER_INTID = 27
 
 FB, FB_SIZE = 0xCC000000, 0x1200000
+
+# UFS host (s9/shim UFS probe #7 reads the GPT through it): standard UFSHCI
+# registers plus the Exynos vendor HCI block (patch 0086).
+UFS_HCI, UFS_HCI_SIZE = 0x11120000, 0x100
+UFS_VS, UFS_VS_SIZE = 0x11121100, 0x100
 FB_W, FB_H, FB_STRIDE = 1440, 2960, 1440 * 4
 
 S9_ECID = 0x5339000000000001  # 'S9' + 1, synthetic (not the phone's)
@@ -141,7 +146,13 @@ def build(seed=None):
     product = [node('product', [ph()] + product_props)] if product_props else []
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
-    # No sweet-ufs node: the Exynos UFS host needs its own driver (phase 4).
+    ufs = node('sweet-ufs', [
+        ph(),
+        ('compatible', cstr('samsung,exynos9810-ufs')),
+        ('reg', u64(UFS_HCI, UFS_HCI_SIZE)),
+        ('exynos-vs', u64(UFS_VS, UFS_VS_SIZE)),
+    ])
+
     return node('device-tree', [
         ph(),
         ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
@@ -152,7 +163,7 @@ def build(seed=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, ufs, buttons, pram] + product)
 
 
 if __name__ == '__main__':

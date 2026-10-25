@@ -1,0 +1,176 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -72,7 +72,11 @@ extern void sweet_usb_probe(void);
+ #define UFS_BLOCK       4096u
+ #define BOUNCE_SIZE     (1u << 20)
+ #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+-#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
++#define PRDT_CHUNK_EXYNOS (4u << 10)            /* Exynos HCI_TXPRDT_ENTRY_SIZE = 2^12 */
++#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK_EXYNOS)
++#define VS_UTRL_NEXUS_TYPE 0x40                 /* Exynos: bit n = slot n is a SCSI command */
++#define OCS_FATAL_ERROR 0x07
++#define UFS_WLUN_DEVICE 0xd0
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
+@@ -100,6 +104,8 @@ struct ucd {
+ 
+ static struct {
+ 	vm_offset_t regs;
++	vm_offset_t vs;                         /* Exynos vendor HCI registers, 0 otherwise */
++	bool exynos;                            /* Galaxy S9 (Exynos 9810) host quirks */
+ 	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
+ 	uint64_t dma_pa;
+ 	uint8_t lun;
+@@ -145,8 +151,38 @@ dma_clean(uint32_t off, uint32_t len)
+  * One SCSI command in slot 0, data (if any) to/from the bounce buffer
+  * (to the device when write is set). Returns 0 or an errno.
+  */
++/*
++ * Exynos UFS host (Galaxy S9, measured with the s9/shim UFS probe; matches
++ * Linux ufs-exynos.c):
++ *  - UTRD response/PRDT offsets and lengths are in bytes, not DWORDs
++ *  - one PRDT entry covers at most 4 KiB
++ *  - vendor register UTRL_NEXUS_TYPE needs the slot's bit set for SCSI commands
++ *  - completed requests may report OCS 0x07 (BROKEN_OCS_FATAL_ERROR): the
++ *    response UPIU decides
++ *  - HCE reads 0 while the host runs (BROKEN_HCE)
++ */
++static inline uint32_t
++vs_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(su.vs + off);
++}
++
++static inline void
++vs_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(su.vs + off) = v;
++}
++
++static int ufs_scsi_lun(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write);
++
+ static int
+ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
++{
++	return ufs_scsi_lun(su.lun, cdb, cdb_len, len, write);
++}
++
++static int
++ufs_scsi_lun(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ {
+ 	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
+ 	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
+@@ -158,7 +194,7 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 
+ 	ucd->cmd[0] = 0x01;                     /* COMMAND UPIU */
+ 	ucd->cmd[1] = len ? (write ? 0x20 : 0x40) : 0x00;      /* W: data out, R: data in */
+-	ucd->cmd[2] = su.lun;
++	ucd->cmd[2] = lun;
+ 	ucd->cmd[3] = ++su.tag;
+ 	ucd->cmd[12] = (uint8_t)(len >> 24);
+ 	ucd->cmd[13] = (uint8_t)(len >> 16);
+@@ -171,16 +207,18 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	utrd->dw2 = 0x0f;                       /* OCS invalid until updated */
+ 	utrd->ucdba = (uint32_t)ucd_pa;
+ 	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+-	utrd->resp = (512u / 4) << 16 | (512u / 4);
++	uint32_t unit = su.exynos ? 1 : 4;
++	uint32_t prdt_chunk = su.exynos ? PRDT_CHUNK_EXYNOS : PRDT_CHUNK;
++	utrd->resp = (512u / unit) << 16 | (512u / unit);
+ 	if (len) {
+ 		uint32_t n = 0;
+-		for (uint32_t done = 0; done < len; done += PRDT_CHUNK, n++) {
+-			uint32_t chunk = MIN(PRDT_CHUNK, len - done);
++		for (uint32_t done = 0; done < len; done += prdt_chunk, n++) {
++			uint32_t chunk = MIN(prdt_chunk, len - done);
+ 			ucd->prdt[n].addr_lo = (uint32_t)(bounce_pa + done);
+ 			ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
+ 			ucd->prdt[n].dbc = chunk - 1;
+ 		}
+-		utrd->prdt = (1024u / 4) << 16 | n;
++		utrd->prdt = (1024u / unit) << 16 | (su.exynos ? n * 16 : n);
+ 	}
+ 
+ 	if (su.cache) {
+@@ -203,6 +241,11 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 		}
+ 	}
+ 	__builtin_arm_dsb(0xf);
++	if (su.exynos) {
++		vs_wr(VS_UTRL_NEXUS_TYPE, vs_rd(VS_UTRL_NEXUS_TYPE) | 1);
++		ufs_wr(REG_IS, ufs_rd(REG_IS));
++		__builtin_arm_dsb(0xf);
++	}
+ 
+ 	ufs_wr(REG_UTRLDBR, 1);
+ 	uint64_t deadline;
+@@ -248,9 +291,17 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	}
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
++	if (su.exynos && ocs == OCS_FATAL_ERROR) {
++		ocs = 0;
++	}
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+-		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+-		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		printf("SWEET UFS: command 0x%02x lun 0x%x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x",
++		    cdb[0], lun, ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		if (ucd->resp[7] == 0x02) {     /* CHECK CONDITION: fixed sense after the 2-byte length */
++			const uint8_t *sd = &ucd->resp[34];
++			printf(" sense %x/%02x/%02x", sd[2] & 0xf, sd[12], sd[13]);
++		}
++		printf("\n");
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -357,7 +408,7 @@ static int
+ ufs_take_over_host(void)
+ {
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+-	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
++	if ((!(hce & 1) && !su.exynos) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+ 		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+ 		return ENXIO;
+ 	}
+@@ -608,6 +659,15 @@ sweet_ufs_init(void)
+ 	su.wait = (wait == 1);
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
++	/* Exynos UFS (s9/tools/mkadt_s9.py): vendor HCI registers in "exynos-vs". */
++	uintptr_t const *vs = NULL;
++	if (SecureDTGetProperty(node, "exynos-vs", (void const **)&vs, &size) == kSuccess &&
++	    size >= 2 * sizeof(uintptr_t)) {
++		su.vs = ml_io_map(vs[0], vs[1]);
++		su.exynos = true;
++		strlcpy(want, "USERDATA", sizeof(want));
++		PE_parse_boot_argn("ufsroot", want, sizeof(want));
++	}
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
+@@ -623,10 +683,22 @@ sweet_ufs_init(void)
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	error = ufs_take_over_host();
++	if (!error && su.exynos) {
++		/*
++		 * S-Boot leaves the device powered down: LUN 0 answers NOT READY,
++		 * 04/02 "initializing command required". START STOP UNIT with power
++		 * condition ACTIVE to the UFS device W-LUN wakes it (Linux
++		 * ufshcd_set_dev_pwr_mode). Power state only; no data is written.
++		 */
++		static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
++		for (int i = 0; i < 4 && (error = ufs_scsi_lun(UFS_WLUN_DEVICE, ssu, sizeof(ssu), 0, false)); i++) {
++		}
++		printf("SWEET UFS: Exynos host, START STOP UNIT %s\n", error ? "failed" : "ok");
++	}
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+ 		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++		for (int i = 0; i < 6 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+ 		}
+ 	}
+ 	if (!error) {
