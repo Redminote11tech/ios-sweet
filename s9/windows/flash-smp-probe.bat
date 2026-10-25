@@ -1,13 +1,13 @@
 @echo off
-rem Flashes smp-probe.img to the S9's BOOT partition (phone must be in TWRP).
+rem Flashes smp-probe2.img to the S9's BOOT partition (phone must be in TWRP).
 rem To go back to Linux, run restore-linux.bat instead.
 cd /d "%~dp0"
 echo === Phone (should say "recovery"):
 adb devices
-echo === Copying smp-probe.img to the phone...
-adb push smp-probe.img /tmp/ || goto fail
+echo === Copying smp-probe2.img to the phone...
+adb push smp-probe2.img /tmp/ || goto fail
 echo === Writing it to BOOT...
-adb shell dd if=/tmp/smp-probe.img of=/dev/block/by-name/BOOT || goto fail
+adb shell dd if=/tmp/smp-probe2.img of=/dev/block/by-name/BOOT || goto fail
 echo === Rebooting the phone.
 adb reboot
 echo Done.

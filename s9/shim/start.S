@@ -166,14 +166,23 @@ safe_fail:
         .balign 8
         .globl smp_entry, smp_entry_end
 smp_entry:
+        // record = 0x5EC0_0000 | CurrentEL<<14 | MPIDR[15:0]; slot by MPIDR
+        // (aff0 + 4*aff1), not by x0, since PSCI 0.1 may not pass context.
+        mov     x9, x0
         mrs     x1, mpidr_el1
         and     x1, x1, #0xffff
+        and     x4, x1, #0xff
+        lsr     x5, x1, #8
+        and     x5, x5, #0xff
+        add     x4, x4, x5, lsl #2
         mrs     x2, CurrentEL
         orr     x1, x1, x2, lsl #14
         movz    w3, #0x5ec0, lsl #16
         orr     x1, x1, x3
         ldr     x2, smp_mbox
-        str     x1, [x2, x0, lsl #3]
+        add     x2, x2, x4, lsl #4
+        str     x9, [x2, #8]
+        str     x1, [x2]
         dsb     sy
         sev
 1:      wfe

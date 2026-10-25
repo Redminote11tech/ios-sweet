@@ -2116,17 +2116,30 @@ static u64 psci(u64 fn, u64 a1, u64 a2, u64 a3)
     return x0;
 }
 
-static void smp_try(u32 slot, u64 mpidr, u64 entry)
+#define PMU 0x14060000UL
+static u32 core_status_off(u64 mpidr)
 {
-    wr32(SMP_MBOX + slot * 8, 0);
-    wr32(SMP_MBOX + slot * 8 + 4, 0);
+    u32 c = (mpidr >> 8) & 0xff, n = mpidr & 0xff;
+    return c == 0 ? 0x2024 + n * 8 : 0x2004 + n * 8;
+}
+
+static void smp_try(u64 mpidr, u64 entry, u32 ctx)
+{
+    u32 slot = (mpidr & 0xff) + ((mpidr >> 8) & 0xff) * 4;
+    u64 mb = SMP_MBOX + slot * 16;
+    for (int i = 0; i < 16; i += 4)
+        wr32(mb + i, 0);
     __asm__ volatile("dsb sy" ::: "memory");
-    u64 rc = psci(0xC4000003UL, mpidr, entry, slot);
+    u32 so = core_status_off(mpidr);
+    u32 st0 = safe_rd32(PMU + so);
+    u64 rc = psci(0xC4000003UL, mpidr, entry, ctx);
     u64 t0 = now();
-    while (!rd32(SMP_MBOX + slot * 8) && now() - t0 < TB_HZ / 2)
+    while (!rd32(mb) && now() - t0 < 2 * TB_HZ)
         ;
-    u32 m = rd32(SMP_MBOX + slot * 8);
-    kvh("  rc ", (u32)rc, "  mailbox ", m);
+    u32 m = rd32(mb);
+    kvh("  rc ", (u32)rc, "  mbox ", m);
+    kvh("  x0 ", rd32(mb + 8), "  status ", st0);
+    kvh("  -> ", safe_rd32(PMU + so), "", 0);
     color(m >> 16 == 0x5ec0 ? OK : BAD);
     puts_(m >> 16 == 0x5ec0 ? "  CORE RAN\n" : "  core did not run\n");
     color(FG);
@@ -2134,24 +2147,31 @@ static void smp_try(u32 slot, u64 mpidr, u64 entry)
 
 static void smp_test(void)
 {
+    u64 el;
+    __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
     color(HEAD);
-    puts_("SMP probe (t8)\n");
-    kvh("  PSCI_VERSION ", (u32)psci(0x84000000UL, 0, 0, 0), "", 0);
-    kvh("  AFFINITY_INFO cpu1 ", (u32)psci(0xC4000004UL, 1, 0, 0), "", 0);
+    puts_("SMP probe 2 (t8)\n");
+    kvh("  boot cpu EL ", (u32)(el >> 2), "", 0);
+    for (int i = 0; i < 4; i++)
+        kvh("  little st ", safe_rd32(PMU + 0x2024 + i * 8), "  big st ", safe_rd32(PMU + 0x2004 + i * 8));
+    kvh("  BID_EN ", safe_rd32(0x14070200UL), "  EVT_EN ", safe_rd32(PMU + 0x7f08));
     color(HEAD);
-    puts_("cpu 1, entry below 4 GiB\n");
-    kvh("  entry ", (u64)smp_entry, "", 0);
-    smp_try(1, 1, (u64)smp_entry);
-    // copy the trampoline to the high bank (MMU off: no cache maintenance)
+    puts_("cpu 1 low entry\n");
+    smp_try(1, (u64)smp_entry, 0x11);
+    color(HEAD);
+    puts_("cpu 4 (big 0x100) low entry\n");
+    smp_try(0x100, (u64)smp_entry, 0x44);
     u32 n = (u32)(smp_entry_end - smp_entry);
     for (u32 i = 0; i < n; i += 4)
         wr32(SMP_HIGH + i, rd32((u64)smp_entry + i));
     __asm__ volatile("dsb sy; isb" ::: "memory");
     color(HEAD);
-    puts_("cpu 2, entry above 4 GiB\n");
-    kvh("  entry ", SMP_HIGH, "  bytes ", n);
-    smp_try(2, 2, SMP_HIGH);
-    kvh("  AFFINITY_INFO cpu1 ", (u32)psci(0xC4000004UL, 1, 0, 0), "  cpu2 ", (u32)psci(0xC4000004UL, 2, 0, 0));
+    puts_("cpu 2 high entry\n");
+    smp_try(2, SMP_HIGH, 0x22);
+    color(HEAD);
+    puts_("all mailbox slots:\n");
+    for (int i = 0; i < 8; i += 2)
+        kvh("  ", rd32(SMP_MBOX + i * 16), "  ", rd32(SMP_MBOX + (i + 1) * 16));
 }
 #endif
 
