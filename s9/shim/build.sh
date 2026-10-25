@@ -7,6 +7,8 @@
 #
 # Then: python3 repack.py BOOT.img xnu-Image shim-boot.img
 set -e
+# Resolve the payload path before changing directory.
+PAYLOAD="${1:+$(realpath "$1")}"
 cd "$(dirname "$0")"
 T="--target=aarch64-none-elf"
 CFLAGS="$T -O2 -ffreestanding -fno-builtin -nostdlib -mgeneral-regs-only -mstrict-align \
@@ -32,7 +34,7 @@ link() {   # link OUT PAYLOAD_OBJ
 clang $CFLAGS -c payload.S -o out/nopayload.o
 link t2-Image out/nopayload.o
 
-if [ -n "${1:-}" ]; then
-    clang $CFLAGS -DPAYLOAD="\"$(realpath "$1")\"" -c payload.S -o out/payload.o
+if [ -n "$PAYLOAD" ]; then
+    clang $CFLAGS -DPAYLOAD="\"$PAYLOAD\"" -c payload.S -o out/payload.o
     link xnu-Image out/payload.o
 fi
