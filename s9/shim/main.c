@@ -49,6 +49,8 @@ static u32 cur_fg = FG;
 
 static void rect(int x, int y, int w, int h, u32 c)
 {
+    if (y < 0 || x < 0 || y + h > FB_H || x + w > FB_W)
+        return;                         // clip: never write outside the framebuffer
     for (int j = 0; j < h; j++) {
         volatile u32 *p = FB + (u64)(y + j) * STRIDE + x;
         for (int i = 0; i < w; i++)
@@ -80,6 +82,8 @@ static void putch(char c)
     if (c == '\n' || cur_x >= COLS - 1) {
         cur_x = 0;
         cur_y++;
+        if (cur_y >= FB_H / CH - 1)
+            cur_y = 1;                  // wrap to the top instead of running off the screen
         if (c == '\n')
             return;
     }
@@ -327,6 +331,8 @@ static void big_digit(int x0, int y0, int d, int px, u32 on, u32 off)
 
 static void counter(int y0)
 {
+    if (y0 > FB_H - 400)
+        y0 = FB_H - 400;
     u64 f = SYSREG(cntfrq_el0);
     if (!f)
         f = 26000000;
@@ -616,6 +622,10 @@ void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 
     // A linked-in XNU payload means: boot it. Returns only if it can't.
     boot_xnu();
+#ifdef HOST
+    if (payload_ok((const struct payload *)payload_start))
+        return;                         // host test of the loader: stop here
+#endif
 
     if (x0 && !(x0 & 7))
         show_fdt((const u8 *)x0);
