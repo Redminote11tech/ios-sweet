@@ -2123,7 +2123,16 @@ static u32 core_status_off(u64 mpidr)
     return c == 0 ? 0x2024 + n * 8 : 0x2004 + n * 8;
 }
 
-static void smp_try(u64 mpidr, u64 entry, u32 ctx)
+static void core_on_seq(u32 bit)
+{
+    // flexpmu core_on sequence from exynos9810 cal-if (what Linux runs per core)
+    safe_wr32(0x14070200UL, safe_rd32(0x14070200UL) & ~(1u << bit));
+    if (safe_rd32(0x14070208UL) & (1u << bit))
+        safe_wr32(0x1407020cUL, 1u << bit);
+    safe_wr32(PMU + 0x7f08, safe_rd32(PMU + 0x7f08) & ~(1u << bit));
+}
+
+static void smp_try(u64 mpidr, u64 entry, u32 ctx, int pmuseq, int sgi)
 {
     u32 slot = (mpidr & 0xff) + ((mpidr >> 8) & 0xff) * 4;
     u64 mb = SMP_MBOX + slot * 16;
@@ -2131,15 +2140,21 @@ static void smp_try(u64 mpidr, u64 entry, u32 ctx)
         wr32(mb + i, 0);
     __asm__ volatile("dsb sy" ::: "memory");
     u32 so = core_status_off(mpidr);
+    if (pmuseq)
+        core_on_seq(4 + (mpidr & 3));
     u32 st0 = safe_rd32(PMU + so);
     u64 rc = psci(0xC4000003UL, mpidr, entry, ctx);
+    u32 st1 = safe_rd32(PMU + so);
+    if (sgi) {
+        safe_wr32(GICD + 0xf00, (1u << (16 + (mpidr & 3))) | 1);   // SGI1 to that core
+    }
     u64 t0 = now();
     while (!rd32(mb) && now() - t0 < 2 * TB_HZ)
         ;
     u32 m = rd32(mb);
     kvh("  rc ", (u32)rc, "  mbox ", m);
-    kvh("  x0 ", rd32(mb + 8), "  status ", st0);
-    kvh("  -> ", safe_rd32(PMU + so), "", 0);
+    kvh("  st ", st0, "  ", st1);
+    kvh("  st 2s ", safe_rd32(PMU + so), "  EVT ", safe_rd32(PMU + 0x7f08));
     color(m >> 16 == 0x5ec0 ? OK : BAD);
     puts_(m >> 16 == 0x5ec0 ? "  CORE RAN\n" : "  core did not run\n");
     color(FG);
@@ -2150,28 +2165,34 @@ static void smp_test(void)
     u64 el;
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
     color(HEAD);
-    puts_("SMP probe 2 (t8)\n");
-    kvh("  boot cpu EL ", (u32)(el >> 2), "", 0);
-    for (int i = 0; i < 4; i++)
-        kvh("  little st ", safe_rd32(PMU + 0x2024 + i * 8), "  big st ", safe_rd32(PMU + 0x2004 + i * 8));
-    kvh("  BID_EN ", safe_rd32(0x14070200UL), "  EVT_EN ", safe_rd32(PMU + 0x7f08));
+    puts_("SMP probe 3 (t8)\n");
+    kvh("  EL ", (u32)(el >> 2), "  GICD_CTLR ", safe_rd32(GICD));
+    kvh("  GICC_CTLR ", safe_rd32(GICC), "  BID_EN ", safe_rd32(0x14070200UL));
+    kvh("  st1 ", safe_rd32(PMU + 0x202c), "  st2 ", safe_rd32(PMU + 0x2034));
     color(HEAD);
-    puts_("cpu 1 low entry\n");
-    smp_try(1, (u64)smp_entry, 0x11);
+    puts_("cpu 1: plain\n");
+    smp_try(1, (u64)smp_entry, 0x11, 0, 0);
+    // enable the distributor (NS group 1) and our CPU interface
+    safe_wr32(GICD, safe_rd32(GICD) | 1);
+    safe_wr32(GICC, safe_rd32(GICC) | 1);
     color(HEAD);
-    puts_("cpu 4 (big 0x100) low entry\n");
-    smp_try(0x100, (u64)smp_entry, 0x44);
-    u32 n = (u32)(smp_entry_end - smp_entry);
-    for (u32 i = 0; i < n; i += 4)
-        wr32(SMP_HIGH + i, rd32((u64)smp_entry + i));
-    __asm__ volatile("dsb sy; isb" ::: "memory");
+    puts_("cpu 2: GIC on + SGI kick\n");
+    smp_try(2, (u64)smp_entry, 0x22, 0, 1);
     color(HEAD);
-    puts_("cpu 2 high entry\n");
-    smp_try(2, SMP_HIGH, 0x22);
+    puts_("cpu 3: PMU core_on seq + SGI\n");
+    smp_try(3, (u64)smp_entry, 0x33, 1, 1);
+    color(HEAD);
+    puts_("cpu 1 again (kick)\n");
+    safe_wr32(GICD + 0xf00, (1u << 17) | 1);
+    u64 t0 = now();
+    while (!rd32(SMP_MBOX + 16) && now() - t0 < TB_HZ)
+        ;
+    kvh("  mbox ", rd32(SMP_MBOX + 16), "  st ", safe_rd32(PMU + 0x202c));
     color(HEAD);
     puts_("all mailbox slots:\n");
     for (int i = 0; i < 8; i += 2)
         kvh("  ", rd32(SMP_MBOX + i * 16), "  ", rd32(SMP_MBOX + (i + 1) * 16));
+    kvh("  GICD_CTLR ", safe_rd32(GICD), "  faults ", safe_faults);
 }
 #endif
 
