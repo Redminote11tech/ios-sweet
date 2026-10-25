@@ -1410,9 +1410,42 @@ static u32 hs_msg(u32 addr, int read, u8 *buf, u32 len, u32 *got)
         u32 c = rd32(HSI2C10 + HS_CTL);
         wr32(HSI2C10 + HS_CTL, c | 1u << 31);
         wr32(HSI2C10 + HS_CTL, c & ~(1u << 31));
-        wr32(HSI2C10 + HS_CONF, 1u << 31);
+        wr32(HSI2C10 + HS_CTL, 1u << 3);
+        wr32(HSI2C10 + HS_CONF, rd32(HSI2C10 + HS_CONF) | 1u << 31);
     }
     return ts;
+}
+
+
+// Samsung i2c-exynos5.c (USI v2) init: SW reset, CTL = MASTER only, trailing
+// count, CONF |= AUTO_MODE, TIMEOUT_EN off; timing like
+// exynos5_i2c_set_timing(): only FS3[23:16] div, FS2[7:0] and FS1[23:16].
+// mode 0: reset defaults, 1/2: fast 400 kHz with ipclk 200 / 26 MHz,
+// 3: standard 100 kHz with ipclk 200 MHz.
+static void hs_samsung(int mode)
+{
+    u32 c = rd32(HSI2C10 + HS_CTL);
+    wr32(HSI2C10 + HS_CTL, c | 1u << 31);
+    wr32(HSI2C10 + HS_CTL, c & ~(1u << 31));
+    if (mode) {
+        u32 ip = mode == 2 ? 26000000u : 200000000u;
+        u32 op = mode == 3 ? 100000u : 400000u;
+        u32 mul = mode == 3 ? 25 : 9;
+        u32 div = (ip / (op * (mode == 3 ? 16 : 15))) & 0xff;
+        wr32(HSI2C10 + HS_FS3, (rd32(HSI2C10 + HS_FS3) & ~0xff0000u) | div << 16);
+        u32 h = (mul * (ip / 1000000)) / ((div + 1) * 10);
+        u32 hd = h ? h - 1 : 0;
+        u32 vh = mode == 3 ? (0xffu << h) & 0xff : ((0xffffffffu >> h) << h) & 0xff;
+        u32 vs = mode == 3 ? (0xffu << hd) & 0xff : ((0xffffffffu >> hd) << hd) & 0xff;
+        if (h >= 32) vh = 0;
+        if (hd >= 32) vs = 0;
+        wr32(HSI2C10 + HS_FS2, (rd32(HSI2C10 + HS_FS2) & ~0xffu) | vh);
+        wr32(HSI2C10 + HS_FS1, (rd32(HSI2C10 + HS_FS1) & ~0xff0000u) | vs << 16);
+    }
+    wr32(HSI2C10 + HS_CTL, 1u << 3);                                    // MASTER
+    wr32(HSI2C10 + 0x08, 0xffffff);                                     // TRAILIG_CTL
+    wr32(HSI2C10 + HS_CONF, rd32(HSI2C10 + HS_CONF) | 1u << 31);        // AUTO_MODE
+    wr32(HSI2C10 + HS_TIMEOUT, rd32(HSI2C10 + HS_TIMEOUT) & ~(1u << 31));
 }
 
 static void input_test(void)
@@ -1612,28 +1645,44 @@ static void input_test(void)
         putch((bank_dat(PIN_ALIVE, GPA1) & 1) ? 'H' : 'L');
     }
     putch('\n');
-    color(DIM);
-    puts_("  ack: ");
-    color(OK);
-    u32 acks = 0;
-    for (u32 a = 0x08; a < 0x78; a++) {
-        u8 b = 0;
-        u32 got = 0, ts = hs_msg(a, 1, &b, 1, &got);
-        if ((ts & 0x1) && !(ts & 0x4)) {
-            hexv(a);
-            putch(' ');
-            acks++;
-        }
+    // Probe #11: attn stays low (event pending: the chip is up), 0x48 read
+    // aborted without NO_DEV_ACK -> bus timing. Try Samsung's init with four
+    // timings; one ID read (write 0x52, read 3) each.
+    u32 r1 = 1, r2 = 1, got = 0;
+    u8 id[3] = { 0 };
+    for (int mode = 0; mode < 4; mode++) {
+        hs_samsung(mode);
+        u8 cmd = 0x52;
+        id[0] = id[1] = id[2] = 0;
+        got = 0;
+        r1 = hs_msg(0x48, 0, &cmd, 1, 0);
+        r2 = hs_msg(0x48, 1, id, 3, &got);
+        color(DIM);
+        puts_("  m");
+        dec(mode);
+        puts_(" fs ");
+        color(FG);
+        hex(rd32(HSI2C10 + HS_FS1) >> 16 & 0xff, 2);
+        putch('/');
+        hex(rd32(HSI2C10 + HS_FS2) & 0xff, 2);
+        putch('/');
+        hex(rd32(HSI2C10 + HS_FS3) >> 16 & 0xff, 2);
+        color(DIM);
+        puts_(" w ");
+        color(FG);
+        hexv(r1);
+        color(DIM);
+        puts_(" r ");
+        color(FG);
+        hexv(r2);
+        color(DIM);
+        puts_(" id ");
+        color(got == 3 ? OK : FG);
+        hexv((u32)id[0] << 16 | id[1] << 8 | id[2]);
+        putch('\n');
+        if (!(r1 & 0x1e) && !(r2 & 0x1e) && got == 3)
+            break;
     }
-    color(FG);
-    putch('\n');
-    kvh("  devices ", acks, "", 0);
-    u8 cmd = 0x52, id[3] = { 0 };
-    u32 got = 0;
-    u32 r1 = hs_msg(0x48, 0, &cmd, 1, 0);
-    u32 r2 = hs_msg(0x48, 1, id, 3, &got);
-    kvh("  0x48 write ts ", r1, "  read ts ", r2);
-    kvh("  id ", (u32)id[0] << 16 | id[1] << 8 | id[2], "  bytes ", got);
     r1 = (r1 & 0x1e) ? r1 : 0;
     r2 = (r2 & 0x1e) || got < 3 ? r2 | 0x100 : 0;
     color(!r1 && !r2 ? OK : BAD);
