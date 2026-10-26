@@ -52,6 +52,7 @@ struct sgl_context {
 	id eagl;
 	unsigned api;
 	struct sweetgl_ctx *ctx;
+	bool debug_on;                  /* Mesa debug output hooked (SWEETGL_GLERR) */
 };
 
 struct sgl_image {
@@ -102,12 +103,50 @@ lookup(id eagl)
 	return c;
 }
 
+/*
+ * Mesa's own reason for each GL error (e.g. why a draw is invalid), via
+ * debug output; SWEETGL_GLERR=1 only. Each distinct message 3 times.
+ */
+void GLAPIENTRY _mesa_DebugMessageCallback(GLDEBUGPROC callback, const void *userParam);
+void GLAPIENTRY _mesa_Enable(GLenum cap);
+
+static void GLAPIENTRY
+sgl_debug_cb(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *msg,
+    const void *user)
+{
+	static struct {
+		unsigned hash, count;
+	} seen[64];
+	static unsigned total;
+	(void)source; (void)length; (void)user;
+	unsigned h = 5381;
+	for (const char *p = msg; *p; p++) {
+		h = h * 33 + (unsigned char)*p;
+	}
+	int i;
+	for (i = 0; i < 64 && seen[i].hash != 0 && seen[i].hash != h; i++) {
+	}
+	if (i == 64) {
+		return;
+	}
+	seen[i].hash = h;
+	if (seen[i].count++ < 3 && total++ < 150) {
+		sweet_drm_log("sweetgl: mesa says (type %#x id %u sev %#x): %.300s", type, id, severity, msg);
+	}
+}
+
 void
 sgl_bind(void *rctx)
 {
 	struct sgl_context *c = rctx;
 	sweetgl_make_current(c ? c->ctx : NULL);
 	sgl_current = c;
+	if (c != NULL && sgl_check_errors && !c->debug_on) {
+		c->debug_on = true;
+		_mesa_Enable(GL_DEBUG_OUTPUT);
+		_mesa_DebugMessageCallback(sgl_debug_cb, NULL);
+		sweet_drm_log("sweetgl: mesa debug output on for context %p", (void *)c);
+	}
 }
 
 void
