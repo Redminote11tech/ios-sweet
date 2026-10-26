@@ -33,4 +33,4 @@ jobs:
             git add -A
             git commit -q -m "Mesa $V source (archive.mesa3d.org)"
             git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mesa-src:mesa-src
-          ) 2>&1 | tee log.txt || { tail -n 25 log.txt | sed 's/^/::error::/'; exit 1; }
+          ) 2>&1 | tee log.txt || { echo "::error::$(tail -n 40 log.txt | tr '\n' '|' | cut -c1-3500)"; exit 1; }
