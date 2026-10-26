@@ -1864,7 +1864,7 @@ swap(Class cls, const char *sel, void *imp)
 
 /*
  * Research hook (SWEETGL_TRACE): which image formats CA's GL renderer asks
- * its format table for (QuartzCore 0x18840433c in dsc-8: (ctx, format,
+ * its format table for (QuartzCore 0x18840833c in dsc-8: (ctx, format,
  * flag, &internalformat, &format, &type, &flags, &x)), with the caller.
  * The first 4 instructions become a jump here; they are replayed before
  * continuing. Needs cs_enforcement_disable (text page written).
@@ -1928,22 +1928,22 @@ sgl_fmt_hook(void)
  */
 #define SGL_HOOKS 12
 static const struct {
-	uint64_t addr;          /* dsc-8, unslid */
+	uint64_t addr;          /* unslid; iPhone X 16.7.16 = ios-sailfish (iPhone 8) + 0x4000, checked by qc-probe */
 	uint32_t code[4];
 	const char *name;
 } sgl_hook_def[SGL_HOOKS] = {
-	{0x188424e54, {0xd103c3ff, 0x6d072beb, 0x6d0823e9, 0xa9096ffc}, "emit_filter"},
-	{0x188427248, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, "render_vibrant_color_matrix"},
-	{0x188427018, {0xd102c3ff, 0x6d0533ed, 0x6d062beb, 0x6d0723e9}, "render_vibrant_filter"},
-	{0x1883900d0, {0xa9bc5ff8, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}, "filter_node"},
-	{0x188372f74, {0xd10703ff, 0x6d1523e9, 0xa9166ffc, 0xa91767fa}, "MaskNode::apply"},
-	{0x18834d888, {0x6db63bef, 0x6d0133ed, 0x6d022beb, 0x6d0323e9}, "prepare_filters"},
-	{0x18834f480, {0xd10303ff, 0x6d0623e9, 0xa90767fa, 0xa9085ff8}, "emit_filter_quads_color"},
-	{0x1882d30b8, {0xd10243ff, 0x6d0323e9, 0xa90467fa, 0xa9055ff8}, "render_background"},
-	{0x188311534, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, "render_solid_background"},
-	{0x1884d504c, {0xd10483ff, 0x6d0d23e9, 0xa90e6ffc, 0xa90f57f6}, "fill_round_rect"},
-	{0x1882f1298, {0xd10203ff, 0xa9045ff8, 0xa90557f6, 0xa9064ff4}, "fill_color_rect"},
-	{0x1884af0d8, {0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6}, "create_shader"},
+	{0x188428e54, {0xd103c3ff, 0x6d072beb, 0x6d0823e9, 0xa9096ffc}, "emit_filter"},
+	{0x18842b248, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, "render_vibrant_color_matrix"},
+	{0x18842b018, {0xd102c3ff, 0x6d0533ed, 0x6d062beb, 0x6d0723e9}, "render_vibrant_filter"},
+	{0x1883940d0, {0xa9bc5ff8, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}, "filter_node"},
+	{0x188376f74, {0xd10703ff, 0x6d1523e9, 0xa9166ffc, 0xa91767fa}, "MaskNode::apply"},
+	{0x188351888, {0x6db63bef, 0x6d0133ed, 0x6d022beb, 0x6d0323e9}, "prepare_filters"},
+	{0x188353480, {0xd10303ff, 0x6d0623e9, 0xa90767fa, 0xa9085ff8}, "emit_filter_quads_color"},
+	{0x1882d70b8, {0xd10243ff, 0x6d0323e9, 0xa90467fa, 0xa9055ff8}, "render_background"},
+	{0x188315534, {0x6db923e9, 0xa9016ffc, 0xa90267fa, 0xa9035ff8}, "render_solid_background"},
+	{0x1884d904c, {0xd10483ff, 0x6d0d23e9, 0xa90e6ffc, 0xa90f57f6}, "fill_round_rect"},
+	{0x1882f5298, {0xd10203ff, 0xa9045ff8, 0xa90557f6, 0xa9064ff4}, "fill_color_rect"},
+	{0x1884b30d8, {0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6}, "create_shader"},
 };
 uint64_t sgl_hook_cont[SGL_HOOKS];
 void sgl_hook_log(uint64_t id, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t lr);
@@ -1989,7 +1989,7 @@ sgl_hook_log(uint64_t id, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, ui
 		if (n < 256) {
 			memcpy(seen[n++], sh, 16);
 		}
-		const char *const *tex = (const char *const *)(uintptr_t)(0x1d5b44a10ull + sgl_cache_slide);
+		const char *const *tex = (const char *const *)(uintptr_t)(0x1d5b48a10ull + sgl_cache_slide);
 		char hex[3 * 0x30 + 1];
 		for (int i = 0; i < 0x30; i++) {
 			snprintf(hex + 3 * i, 4, "%02x ", sh[i]);
@@ -2127,7 +2127,7 @@ sgl_install_fmt_hook(void)
 		return;
 	}
 	sgl_cache_slide = (uint64_t)(uintptr_t)cache - 0x180000000ull;
-	uint32_t *t = (uint32_t *)(uintptr_t)(0x18840433cull + sgl_cache_slide);
+	uint32_t *t = (uint32_t *)(uintptr_t)(0x18840833cull + sgl_cache_slide);
 	static const uint32_t want[4] = {0xb90000bf, 0xb900009f, 0xb900007f, 0x390000df};
 	if (memcmp(t, want, sizeof(want)) != 0) {
 		sweet_drm_log("sweetgl: format hook: unexpected code at %p (%08x), not hooked", (void *)t, t[0]);
@@ -2154,8 +2154,8 @@ sgl_install_fmt_hook(void)
 
 /*
  * QuartzCore (dsc-8) GL renderer fixes, see vcm_func and nop_func:
- * tex_fragment_shaders (0x1d5b44a10) entries, and create_shader's
- * per-function uniform switch (byte table 0x18855a1e4, index function -
+ * tex_fragment_shaders (0x1d5b48a10) entries, and create_shader's
+ * per-function uniform switch (byte table 0x18855e1e4, index function -
  * 0x11) set to look up the uniform names the function uses instead of
  * nothing (case 0xde).
  */
@@ -2188,8 +2188,8 @@ sgl_install_texfns(void)
 		return;
 	}
 	uint64_t slide = (uint64_t)(uintptr_t)cache - 0x180000000ull;
-	const char **table = (const char **)(uintptr_t)(0x1d5b44a10ull + slide);
-	uint8_t *cases = (uint8_t *)(uintptr_t)(0x18855a1e4ull - 0x11 + slide);
+	const char **table = (const char **)(uintptr_t)(0x1d5b48a10ull + slide);
+	uint8_t *cases = (uint8_t *)(uintptr_t)(0x18855e1e4ull - 0x11 + slide);
 	if (table[0x13] == NULL || strcmp(table[0x13], "colorMatrix4x4Bias(s0)") != 0 || cases[0x13] != 0) {
 		sweet_drm_log("sweetgl: texture function fixes: unexpected QuartzCore, not installed");
 		return;
