@@ -1,0 +1,34 @@
+name: mesa-src
+
+# Mirrors a Mesa release into the orphan branch mesa-src (source tree only),
+# so it can be read and patched where freedesktop.org is not reachable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Mesa release
+        default: "25.0.7"
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch and push
+        env:
+          V: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          curl -fsSL -o mesa.tar.xz "https://archive.mesa3d.org/mesa-$V.tar.xz"
+          mkdir src && tar -xJf mesa.tar.xz -C src --strip-components=1
+          cd src
+          git init -q -b mesa-src
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Mesa $V source (archive.mesa3d.org)"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mesa-src:mesa-src
