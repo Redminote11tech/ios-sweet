@@ -1,4 +1,4 @@
-# iOS 16 on Galaxy S9 — port plan
+# iOS 16 on Galaxy S9
 
 Oct 22, 2026 · @alphanCZE
 
