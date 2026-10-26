@@ -75,7 +75,13 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee "$RUNNER_TEMP/build.log" || {
+            e=$(grep -E "error:|Error [0-9]|undefined symbol" "$RUNNER_TEMP/build.log" | grep -v "^make.*Error 1$" | sort -u | head -40 | tr '\n' '|')
+            echo "::error title=xnu build::${e:-$(tail -c 3000 "$RUNNER_TEMP/build.log" | tr '\n' '|')}"
+            exit 1
+          }
 
       - name: Package build tree for local compiles
         if: always()
