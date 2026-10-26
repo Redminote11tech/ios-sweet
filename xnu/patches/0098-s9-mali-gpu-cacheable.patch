@@ -1,0 +1,62 @@
+diff --git a/bsd/dev/s9_mali.c b/bsd/dev/s9_mali.c
+index 5a6fa4b..57d7e6d 100644
+--- a/bsd/dev/s9_mali.c
++++ b/bsd/dev/s9_mali.c
+@@ -91,6 +91,16 @@ extern void thread_deallocate(thread_t);
+ #define AS_FAULTADDRESS         0x20
+ #define AS_STATUS               0x28
+ #define AS_TRANSCFG             0x30
++/*
++ * MEMATTR: every PTE uses index 0 = write-back, read/write allocate, Mali
++ * "internal" shareability, as Linux panfrost maps all GPU memory
++ * (IOMMU_CACHE -> mair 0xff -> INNER_OUTER_WB | ALLOC_EXPL(1, 1) |
++ * SH_MIDGARD_INNER = 0x8f) even on non-coherent SoCs: the GPU caches in its
++ * L2 and every job starts and ends with a clean+invalidate. Non-cacheable
++ * (0x4c) ran WRITE_VALUE jobs but Mesa's shader/tiler jobs faulted with
++ * MEM_ATTR_NONCACHE_3 (AS0 fault 0x350002ef). The rest stay non-cacheable.
++ */
++#define S9_MALI_MEMATTR         0x4c4c4c4c4c4c4c8fULL
+ #define AS_CMD_UPDATE           1u
+ #define AS_CMD_LOCK             2u
+ #define AS_CMD_FLUSH_PT         4u
+@@ -98,12 +108,7 @@ extern void thread_deallocate(thread_t);
+ 
+ #define PTE_BLOCK_OR_PAGE       0x3ull          /* level 3 page / table */
+ #define PTE_AF                  (1ull << 10)
+-/*
+- * Non-cacheable pages are outer shareable, as Linux io-pgtable-arm makes
+- * them (ARM_LPAE_PTE_SH_OS without IOMMU_CACHE): inner shareable NC pages
+- * gave MEM_ATTR_NONCACHE_3 faults (AS0 fault 0x350002ef) on Mesa's jobs.
+- */
+-#define PTE_SH_OUTER            (2ull << 8)
++#define PTE_SH_INNER            (3ull << 8)
+ #define PTE_AP_UNPRIV           (1ull << 6)
+ #define PTE_AP_RDONLY           (1ull << 7)
+ #define PTE_XN                  (1ull << 54)
+@@ -285,7 +290,7 @@ s9_mali_vm_map(const uint64_t *pa, uint32_t npages, uint32_t flags)
+ 		return 0;
+ 	}
+ 	uint64_t va = S9_MALI_VA_BASE + (uint64_t)start * PAGE_SIZE;
+-	uint64_t attr = PTE_BLOCK_OR_PAGE | PTE_AF | PTE_SH_OUTER | PTE_AP_UNPRIV |
++	uint64_t attr = PTE_BLOCK_OR_PAGE | PTE_AF | PTE_SH_INNER | PTE_AP_UNPRIV |
+ 	    ((flags & S9_MALI_MAP_READONLY) ? PTE_AP_RDONLY : 0) |
+ 	    ((flags & S9_MALI_MAP_NOEXEC) ? PTE_XN : 0);
+ 	for (uint32_t p = 0; p < npages; p++) {
+@@ -398,7 +403,7 @@ poll_locked(void)
+ 		}
+ 		wr(JOB_IRQ_CLEAR, bits);
+ 		wr64(AS0 + AS_TRANSTAB, m.l0_pa);
+-		wr64(AS0 + AS_MEMATTR, 0x4c4c4c4c4c4c4c4cULL);
++		wr64(AS0 + AS_MEMATTR, S9_MALI_MEMATTR);
+ 		wr64(AS0 + AS_TRANSCFG, AS_TRANSCFG_VALUE);
+ 		wr(AS0 + AS_COMMAND, AS_CMD_UPDATE);
+ 		wait_bits(AS0 + AS_STATUS, 1, 0, 10000);
+@@ -545,7 +550,7 @@ hw_up(void)
+ 		return false;
+ 	}
+ 	wr64(AS0 + AS_TRANSTAB, m.l0_pa);
+-	wr64(AS0 + AS_MEMATTR, 0x4c4c4c4c4c4c4c4cULL);
++	wr64(AS0 + AS_MEMATTR, S9_MALI_MEMATTR);
+ 	wr64(AS0 + AS_TRANSCFG, AS_TRANSCFG_VALUE);
+ 	wr(AS0 + AS_COMMAND, AS_CMD_UPDATE);
+ 	if (!wait_bits(AS0 + AS_STATUS, 1, 0, 10000)) {
