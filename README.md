@@ -6,7 +6,7 @@ Oct 22, 2026 · @alphanCZE
 
 A Galaxy S9 port of [ios-sweet](https://github.com/dipa-studio/ios-sweet) is realistic, but it is a port of the method, not the code: roughly the upper half (iOS userland, kernel services, root image) carries over, and the lower half (boot shim, interrupts, storage, input, power) must be rewritten for the Exynos 9810.
 
-ios-sweet compiles Apple's open-source XNU (xnu-8796) for a Snapdragon 732G phone and runs the unmodified iPhone X iOS 16.7.16 userland on it. Apple's signed boot chain is never involved: a custom shim, booted by the unlocked bootloader, loads XNU directly. It reached the SpringBoard home screen on 2026-10-18, with CPU-only rendering, no Wi-Fi/audio/GPU, and security (AMFI, sandbox, keystore) stubbed.
+ios-sweet compiles Apple's open-source XNU (xnu-8796) for a Snapdragon 732G phone and runs the unmodified iPhone X iOS 16.7.16 userland on it. Apple's signed boot chain is never involved: a custom shim, booted by the unlocked bootloader, loads XNU directly. It reached the SpringBoard home screen on 2026-10-18, with CPU-only rendering, no Wi-Fi/audio, GPU not fully working but can render !.
 
 The S9 has two things going for it: its little cores are the same Cortex-A55 that ios-sweet runs on, and your mainline Linux work produces exactly the hardware facts (memory map, framebuffer, UFS, touch, keys) that the port needs.
 
