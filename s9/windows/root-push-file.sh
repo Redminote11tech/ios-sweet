@@ -16,7 +16,7 @@ EXT=$FILES/extents-$NAME.txt
 size=$(stat -c %s "$FILES/$NAME")
 max=$(cat "$FILES/size-$NAME.txt")
 [ "$size" -le "$max" ] || { echo "RESULT: TOO_BIG ($size > $max bytes installed)"; exit 1; }
-"$ADB" push "$HERE/s9io" /tmp/s9io >/dev/null
+"$ADB" push "$(wslpath -w "$HERE/s9io")" /tmp/s9io >/dev/null
 "$ADB" shell chmod 755 /tmp/s9io
 "$ADB" shell 'umount /data 2>/dev/null; true'
 padded=$(mktemp)

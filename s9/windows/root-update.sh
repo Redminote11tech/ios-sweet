@@ -36,7 +36,7 @@ if [ "$free" -lt $((SIZE + (1 << 30))) ]; then
 	exit 1
 fi
 "$ADB" devices
-"$ADB" push "$HERE/s9io" /tmp/s9io >/dev/null
+"$ADB" push "$(wslpath -w "$HERE/s9io")" /tmp/s9io >/dev/null
 "$ADB" shell chmod 755 /tmp/s9io
 "$ADB" shell 'umount /data 2>/dev/null; umount /sdcard 2>/dev/null; umount /data/media 2>/dev/null; true'
 sig=$("$ADB" exec-out "dd if=$DEV bs=1024 skip=1 count=1 2>/dev/null" | head -c 2)
