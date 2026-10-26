@@ -76,7 +76,11 @@ def main():
                 note = f'-> {ops[0].imm:#x}'
             mark = '>>' if ins.address == base + off else '  '
             out.append(f'{mark}+{ins.address - base:#07x} {ins.mnemonic} {ins.op_str}' + (f'   ; {note}' if note else ''))
-    print('::notice title=qc-cdis::' + '%0A'.join(out)[:60000])
+    keep = [l for l in out if l.startswith('---') or l.startswith('>>') or ';' in l
+            or any(k in l for k in (' cbz ', ' cbnz ', ' tbz ', ' tbnz ', ' b.', ' brk ', ' ret'))]
+    text = '\n'.join(keep)
+    for i in range(0, len(text), 3500):
+        print(f'::notice title=qc-cdis {i // 3500}::' + text[i:i + 3500].replace('\n', '%0A'))
     print('\n'.join(out))
 
 
