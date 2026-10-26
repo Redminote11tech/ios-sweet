@@ -25,7 +25,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download -R blacktop/ipsw -p '*_linux_x86_64.tar.gz' -D /tmp/ipsw
+          assets=$(gh release view -R blacktop/ipsw --json assets -q '.assets[].name')
+          echo "$assets" | grep -i linux || true
+          a=$(echo "$assets" | grep -iE '^ipsw_.*linux.*(x86_64|amd64).*\.tar\.gz$' | grep -viE 'extras|ipswd|debug' | head -1)
+          [ -n "$a" ] || { echo "::error::no linux asset in: $(echo $assets)"; exit 1; }
+          gh release download -R blacktop/ipsw -p "$a" -D /tmp/ipsw
           tar -xzf /tmp/ipsw/*.tar.gz -C /tmp/ipsw
           sudo install -m 755 "$(find /tmp/ipsw -type f -name ipsw | head -1)" /usr/local/bin/ipsw
           ipsw version
