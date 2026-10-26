@@ -88,7 +88,7 @@ jobs:
           echo "::notice title=fs files::$(find "$RUNNER_TEMP/fs" -type f | head -5 | tr '\n' ' ')"
           [ -n "$f" ] || { echo "::error::no file: $(tail -c 3000 "$RUNNER_TEMP/fs.log" | tr '\n' ' ')"; exit 1; }
           echo "file: $f"
-          ls -la "$f"; file "$f"
+          echo "::notice title=fs file info::$(ls -la "$f") $(file -b "$f") nonzero=$(tr -d '\0' < "$f" | wc -c) $(head -c 64 "$f" | xxd -p | tr -d '\n')"
           python3 s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}" > "$RUNNER_TEMP/qf.log" 2>&1 \
             || { echo "::error::qc-file: $(tail -c 3000 "$RUNNER_TEMP/qf.log" | tr '\n' ' ')"; exit 1; }
           cat "$RUNNER_TEMP/qf.log"
