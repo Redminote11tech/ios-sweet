@@ -156,6 +156,13 @@ def build(seed=None):
         ('opposed-power-vol-buttons', u32(1)),
     ])
     product_props = d22ap_product()
+    if product_props:
+        # iPhone X says P3: with the GLES renderer (sweetgl) CoreAnimation then
+        # draws the display in 10-bit 'b3a8' surfaces, which neither Mesa's
+        # import (eagl.c) nor the CPU present path handle (ios-ca1: black
+        # screen, "attachImage: surface 2 b3a8 ... format failed"). sRGB keeps
+        # the display surfaces 'BGRA' as with the software renderer.
+        product_props = [(k, cstr('sRGB') if k == 'artwork-display-gamut' else v) for k, v in product_props]
     product = [node('product', [ph()] + product_props)] if product_props else []
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
