@@ -125,8 +125,25 @@ mount -t hfsplus -o loop,ro "$IMG" "$MNT"
 sed 's/\r$//' "$FILES/install.txt" | while read -r src dest mode; do
 	[ -n "$src" ] && [ "${src#\#}" = "$src" ] || continue
 	n=$(basename "$dest")
-	filefrag -v -b4096 "$MNT$dest" > "$FILES/filefrag-$n.txt" 2>&1 || true
-	awk '/^ *[0-9]+:/ { gsub(/\.\./," "); gsub(/:/," "); print $2, $4, $5 }' "$FILES/filefrag-$n.txt" > "$FILES/extents-$n.txt"
+	# FIBMAP per 4 KiB block (filefrag only prints discontinuities on hfsplus)
+	python3 -I - "$MNT$dest" > "$FILES/extents-$n.txt" <<'EOF'
+import fcntl, os, struct, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+bs = struct.unpack('i', fcntl.ioctl(fd, 2, b'\0' * 4))[0]          # FIGETBSZ
+n = (os.fstat(fd).st_size + bs - 1) // bs
+assert bs == 4096, bs
+run = None
+for i in range(n):
+    p = struct.unpack('i', fcntl.ioctl(fd, 1, struct.pack('i', i)))[0]  # FIBMAP
+    if run and p == run[2] + 1:
+        run[2] = p
+    else:
+        if run:
+            print(*run)
+        run = [i, p, p]
+if run:
+    print(*run)
+EOF
 	stat -c %s "$MNT$dest" > "$FILES/size-$n.txt"
 	echo "extents of $dest: $(wc -l < "$FILES/extents-$n.txt")"
 	head -5 "$FILES/filefrag-$n.txt"
