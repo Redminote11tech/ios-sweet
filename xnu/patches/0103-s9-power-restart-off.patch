@@ -1,13 +1,13 @@
-From 1272417c755507396337a563a5e0267fc9b2ce70 Mon Sep 17 00:00:00 2001
+From 07b29d4ef3f7503fbbbaf8db4e5e11738ab116c3 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 26 Oct 2026 21:43:45 +0100
 Subject: [PATCH] 0103
 
 ---
  bsd/conf/files      |  1 +
- bsd/dev/s9_power.c  | 71 +++++++++++++++++++++++++++++++++++++++++++++
+ bsd/dev/s9_power.c  | 72 +++++++++++++++++++++++++++++++++++++++++++++
  bsd/dev/sweet_ufs.c |  2 ++
- 3 files changed, 74 insertions(+)
+ 3 files changed, 75 insertions(+)
  create mode 100644 bsd/dev/s9_power.c
 
 diff --git a/bsd/conf/files b/bsd/conf/files
@@ -24,10 +24,10 @@ index 644bde9..bf6c47d 100644
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/s9_power.c b/bsd/dev/s9_power.c
 new file mode 100644
-index 0000000..f1dd9cc
+index 0000000..9ed8aac
 --- /dev/null
 +++ b/bsd/dev/s9_power.c
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,72 @@
 +/*
 + * Galaxy S9 (Exynos 9810) restart and power off, for iOS's own controls
 + * (Settings > General > Shut Down, AssistiveTouch Restart, reboot(2)).
@@ -56,6 +56,7 @@ index 0000000..f1dd9cc
 +#define PE_RESTART_CPU          1       /* kPERestartCPU */
 +
 +extern int (*PE_halt_restart)(unsigned int type);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +static volatile uint32_t *s9_pmu;
 +
