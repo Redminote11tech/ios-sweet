@@ -53,10 +53,10 @@ jobs:
           ipsw extract --help 2>&1 | grep -iE "remote|dyld|output" | head -20
           sudo -E env PATH="$PATH" ipsw extract --dyld --dyld-arch arm64 --remote -o "$RUNNER_TEMP/dsc" "$IPSW_URL" > "$RUNNER_TEMP/ex.log" 2>&1 || true
           tail -c 3000 "$RUNNER_TEMP/ex.log"
+          sudo chown -R "$USER" "$RUNNER_TEMP/dsc"; chmod -R u+rwX "$RUNNER_TEMP/dsc"
           find "$RUNNER_TEMP/dsc" -type f | head -40
           cache=$(find "$RUNNER_TEMP/dsc" -type f -name 'dyld_shared_cache_arm64' | head -1)
           [ -n "$cache" ] || { echo "::error::no cache extracted: $(tail -c 3000 "$RUNNER_TEMP/ex.log" | tr '\n' ' ')"; exit 1; }
-          sudo chown -R "$USER" "$RUNNER_TEMP/dsc"
           echo "CACHE=$cache" >> "$GITHUB_ENV"
       - name: probe
         env:
