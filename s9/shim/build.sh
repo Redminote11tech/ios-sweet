@@ -53,6 +53,10 @@ link t7-Image out/nopayload.o
 # t8: PSCI CPU_ON probe (low vs high entry address)
 clang $CFLAGS -DSMPTEST -c main.c -o out/main.o
 link t8-Image out/nopayload.o
+
+# t9: big (Mongoose) cluster CPU_ON probe
+clang $CFLAGS -DBIGTEST -c main.c -o out/main.o
+link t9-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

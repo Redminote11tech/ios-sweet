@@ -258,6 +258,57 @@ smp_fb:
         .quad   0xcc000000
 smp_entry_end:
 
+// big_entry .. big_entry_end: big-core probe (t9). x0 = PSCI context id
+// (0..3) picks a fixed mailbox slot at big_mb + 16*ctx and a fixed magenta
+// bar at rows 1400 + 120*ctx: nothing depends on MPIDR. Word 0 = 0xb16c0000
+// | CurrentEL, word 1 = MPIDR_EL1, word 2 = counter. MMU off, no stack.
+        .balign 8
+        .globl big_entry, big_entry_end
+big_entry:
+        and     x10, x0, #3
+        mrs     x1, CurrentEL
+        ldr     x6, big_mb
+        add     x6, x6, x10, lsl #4
+        movz    w3, #0xb16c, lsl #16
+        orr     w3, w3, w1
+        str     w3, [x6]
+        mrs     x1, mpidr_el1
+        str     w1, [x6, #4]
+        dsb     sy
+        ldr     x7, big_fb
+        mov     x8, #5760
+        mov     x9, #1400
+        mov     x12, #120
+        madd    x9, x10, x12, x9
+        mul     x9, x9, x8
+        add     x7, x7, x9
+        movz    w13, #0x00ff
+        movk    w13, #0x00ff, lsl #16           // magenta
+        mov     x11, #60
+1:      mov     x12, #1440
+        mov     x14, x7
+2:      str     w13, [x14], #4
+        subs    x12, x12, #1
+        b.ne    2b
+        add     x7, x7, x8
+        subs    x11, x11, #1
+        b.ne    1b
+        dsb     sy
+        mov     x15, #0
+3:      add     x15, x15, #1
+        str     w15, [x6, #8]
+        dsb     sy
+        mov     x16, #0x100000
+4:      subs    x16, x16, #1
+        b.ne    4b
+        b       3b
+        .balign 8
+big_mb:
+        .quad   0xef300800
+big_fb:
+        .quad   0xcc000000
+big_entry_end:
+
 irq_common:
         sub     sp, sp, #(24 * 8)
         stp     x0, x1, [sp, #0]

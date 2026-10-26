@@ -2192,6 +2192,94 @@ static void smp_test(void)
 }
 #endif
 
+// ---------------------------------------------------------------- big-core probe (t9)
+// The Mongoose (big) cluster under PSCI CPU_ON 0x100..0x103, with an entry
+// that reports by PSCI context id (not MPIDR): the t8 probes could not tell
+// a big core's bar/mailbox from little core 1's. Shows the CPUCL1 PLL and
+// PMU state, starts big cores BEFORE any little core (a big CPU_ON after a
+// little one hung the caller), then little core 1 last as a control.
+#ifdef BIGTEST
+extern char big_entry[], big_entry_end[];
+#define BIG_MB 0xef300800UL
+#define CMU_CPUCL1 0x1d100000UL
+#define CMU_CPUCL0 0x1d000000UL
+
+static u64 psci_call(u64 fn, u64 a1, u64 a2, u64 a3)
+{
+    register u64 x0 __asm__("x0") = fn;
+    register u64 x1 __asm__("x1") = a1;
+    register u64 x2 __asm__("x2") = a2;
+    register u64 x3 __asm__("x3") = a3;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+                     "x14", "x15", "x16", "x17", "memory");
+    return x0;
+}
+
+static void big_state(const char *what)
+{
+    puts_(what);
+    kvh("  CL1 PLL ", safe_rd32(CMU_CPUCL1 + 0x120), "  CL0 PLL ", safe_rd32(CMU_CPUCL0 + 0x140));
+    kvh("  CL1 mux user ", safe_rd32(CMU_CPUCL1 + 0x100), "  mux pll ", safe_rd32(CMU_CPUCL1 + 0x1000));
+    kvh("  CL1 noncpu ", safe_rd32(0x14060000UL + 0x2044), "  APM2AP ", safe_rd32(0x14100010UL));
+    kvh("  CL1 cpu0 ", safe_rd32(0x14060000UL + 0x2004), "  cpu1 ", safe_rd32(0x14060000UL + 0x200c));
+}
+
+static int big_start(u64 target, u32 ctx)
+{
+    u64 mb = BIG_MB + ctx * 16;
+    for (int i = 0; i < 16; i += 4)
+        wr32(mb + i, 0);
+    __asm__ volatile("dsb sy" ::: "memory");
+    color(HEAD);
+    kvh("CPU_ON target ", (u32)target, " ctx ", ctx);
+    color(FG);
+    u64 rc = psci_call(0xC4000003UL, target, (u64)big_entry, ctx);
+    u64 t0 = now();
+    while (!rd32(mb) && now() - t0 < 2 * TB_HZ)
+        ;
+    u32 c1 = rd32(mb + 8);
+    wait_ticks(TB_HZ / 2);
+    kvh("  rc ", (u32)rc, "  hello ", rd32(mb));
+    kvh("  MPIDR ", rd32(mb + 4), "  counting ", rd32(mb + 8) != c1);
+    int ran = rd32(mb) >> 16 == 0xb16c;
+    color(ran ? OK : BAD);
+    puts_(ran ? "  CORE RUNS\n" : "  no sign of life\n");
+    color(FG);
+    return ran;
+}
+
+static void big_test(void)
+{
+    color(HEAD);
+    puts_("Big-core probe (t9): Mongoose cluster\n");
+    color(FG);
+    u64 mpidr;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    kvh("  boot MPIDR ", (u32)mpidr, "  entry ", (u32)(u64)big_entry);
+    big_state("before:\n");
+    int b0 = big_start(0x100, 0);
+    big_state("after big 0:\n");
+    if (!b0) {
+        // the cluster-on step Samsung's CAL runs (APM mailbox bit 24 clear)
+        // and the per-core PMU wakeup unmask, then the next big core
+        safe_wr32(0x14100010UL, safe_rd32(0x14100010UL) & ~(1u << 24));
+        safe_wr32(0x14070200UL, safe_rd32(0x14070200UL) & ~(1u << 1));
+        safe_wr32(0x14060000UL + 0x7f08, safe_rd32(0x14060000UL + 0x7f08) & ~(1u << 1));
+        puts_("cluster-on + wakeup unmask for big 1\n");
+    }
+    big_start(0x101, 1);
+    big_start(0x102, 2);
+    big_state("after big 0-2:\n");
+    puts_("control: little core 1 with the same entry\n");
+    big_start(0x1, 3);
+    color(HEAD);
+    puts_("\nDone.\n");
+    for (;;)
+        __asm__ volatile("wfe");
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -2213,6 +2301,9 @@ void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 {
     rect(0, 0, FB_W, FB_H, BG);
+#ifdef BIGTEST
+    big_test();
+#endif
 #ifdef SMPTEST
     smp_test();
 #endif
