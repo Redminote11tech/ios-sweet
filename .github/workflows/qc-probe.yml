@@ -85,6 +85,10 @@ jobs:
           sudo -E env PATH="$PATH" ipsw extract --files --pattern '${{ inputs.fsfile }}' --remote -o "$RUNNER_TEMP/fs" "$IPSW_URL" > "$RUNNER_TEMP/fs.log" 2>&1 || true
           sudo chown -R "$USER" "$RUNNER_TEMP/fs"; chmod -R u+rwX "$RUNNER_TEMP/fs"
           f=$(find "$RUNNER_TEMP/fs" -type f | head -1)
+          echo "::notice title=fs files::$(find "$RUNNER_TEMP/fs" -type f | head -5 | tr '\n' ' ')"
           [ -n "$f" ] || { echo "::error::no file: $(tail -c 3000 "$RUNNER_TEMP/fs.log" | tr '\n' ' ')"; exit 1; }
           echo "file: $f"
-          python3 -I s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}"
+          ls -la "$f"; file "$f"
+          python3 -I s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}" > "$RUNNER_TEMP/qf.log" 2>&1 \
+            || { echo "::error::qc-file: $(tail -c 3000 "$RUNNER_TEMP/qf.log" | tr '\n' ' ')"; exit 1; }
+          cat "$RUNNER_TEMP/qf.log"
