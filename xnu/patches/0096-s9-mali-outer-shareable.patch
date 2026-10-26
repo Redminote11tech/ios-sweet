@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/s9_mali.c b/bsd/dev/s9_mali.c
+index 4365d5d..39d7f73 100644
+--- a/bsd/dev/s9_mali.c
++++ b/bsd/dev/s9_mali.c
+@@ -98,7 +98,12 @@ extern void thread_deallocate(thread_t);
+ 
+ #define PTE_BLOCK_OR_PAGE       0x3ull          /* level 3 page / table */
+ #define PTE_AF                  (1ull << 10)
+-#define PTE_SH_INNER            (3ull << 8)
++/*
++ * Non-cacheable pages are outer shareable, as Linux io-pgtable-arm makes
++ * them (ARM_LPAE_PTE_SH_OS without IOMMU_CACHE): inner shareable NC pages
++ * gave MEM_ATTR_NONCACHE_3 faults (AS0 fault 0x350002ef) on Mesa's jobs.
++ */
++#define PTE_SH_OUTER            (2ull << 8)
+ #define PTE_AP_UNPRIV           (1ull << 6)
+ #define PTE_AP_RDONLY           (1ull << 7)
+ #define PTE_XN                  (1ull << 54)
+@@ -280,7 +285,7 @@ s9_mali_vm_map(const uint64_t *pa, uint32_t npages, uint32_t flags)
+ 		return 0;
+ 	}
+ 	uint64_t va = S9_MALI_VA_BASE + (uint64_t)start * PAGE_SIZE;
+-	uint64_t attr = PTE_BLOCK_OR_PAGE | PTE_AF | PTE_SH_INNER | PTE_AP_UNPRIV |
++	uint64_t attr = PTE_BLOCK_OR_PAGE | PTE_AF | PTE_SH_OUTER | PTE_AP_UNPRIV |
+ 	    ((flags & S9_MALI_MAP_READONLY) ? PTE_AP_RDONLY : 0) |
+ 	    ((flags & S9_MALI_MAP_NOEXEC) ? PTE_XN : 0);
+ 	for (uint32_t p = 0; p < npages; p++) {
