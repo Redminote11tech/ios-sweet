@@ -27,6 +27,7 @@ jobs:
             curl -fsSL -o mesa.tar.xz "https://archive.mesa3d.org/mesa-$V.tar.xz"
             mkdir src && tar -xJf mesa.tar.xz -C src --strip-components=1
             cd src
+            rm -rf .github
             git init -q -b mesa-src
             git config user.name "github-actions"
             git config user.email "github-actions@users.noreply.github.com"
