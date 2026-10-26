@@ -1554,6 +1554,27 @@ upload_format(uint32_t fourcc, size_t bpe, GLenum *format, GLenum *type)
 }
 
 /*
+ * Errors CA's own GL calls left pending: drained before our own call so
+ * they are not taken for our failure (a false return drops CA's texture).
+ * Logged a few times per value; SWEETGL_GLERR=1 shows which call set them.
+ */
+static void
+sgl_drain_stale(const char *why)
+{
+	static unsigned logged[8];
+	for (int i = 0; i < 4; i++) {
+		GLenum e = glGetError();
+		if (e == GL_NO_ERROR) {
+			return;
+		}
+		unsigned k = e - GL_INVALID_ENUM;
+		if (k >= 8 || logged[k]++ < 5) {
+			sweet_drm_log("sweetgl: %s: stale GL error %#x from an earlier call (ignored)", why, e);
+		}
+	}
+}
+
+/*
  * Rows the GPU cannot sample in place (A5xx pitch is 64-byte aligned; CA's
  * own bitmaps are not): copied into the texture instead.
  * ponytail: a snapshot, later CPU writes to the surface are not seen (CA's
@@ -1571,6 +1592,7 @@ copy_surface(IOSurfaceRef s, GLenum target, GLenum format, GLenum type, size_t w
 	}
 	GLint row = 0, align = 4, skip_rows = 0, skip_pixels = 0;
 	uint32_t seed = IOSurfaceGetSeed(s);
+	sgl_drain_stale(why);
 	glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row);
 	glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
 	glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
@@ -1700,6 +1722,7 @@ bind_surface(IOSurfaceRef s, GLenum target, GLenum format, GLenum type, uint32_t
 		return false;
 	}
 	copy_forget(unit_held[active_unit()]);
+	sgl_drain_stale(why);
 	_mesa_EGLImageTargetTexture2DOES(target, (GLeglImageOES)&img);
 	GLenum e = glGetError();
 	tex_size_bound(target, 0, (GLsizei)w, (GLsizei)h);
