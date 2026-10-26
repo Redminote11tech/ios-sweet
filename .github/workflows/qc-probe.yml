@@ -14,6 +14,12 @@ on:
       sym:
         description: "unslid shared-cache addresses to symbolicate (space separated)"
         default: ""
+      fsfile:
+        description: "regex of a root filesystem file to disassemble (e.g. PosterBoard.app/PosterBoard$)"
+        default: ""
+      fsoffs:
+        description: "image offsets in that file: off[,before,after] ..."
+        default: ""
 
 permissions:
   contents: read
@@ -71,3 +77,14 @@ jobs:
           python3 -I s9/tools/qc-verify.py "$CACHE" "${{ inputs.delta || '0x4000' }}"
           [ -z "${{ inputs.sym }}" ] || python3 -I s9/tools/qc-sym.py "$CACHE" "${{ inputs.sym }}"
           [ -z "$DISASS" ] || python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
+      - name: filesystem file
+        if: inputs.fsfile != ''
+        run: |
+          pip install -q capstone
+          mkdir -p "$RUNNER_TEMP/fs"
+          sudo -E env PATH="$PATH" ipsw extract --files --pattern '${{ inputs.fsfile }}' --remote -o "$RUNNER_TEMP/fs" "$IPSW_URL" > "$RUNNER_TEMP/fs.log" 2>&1 || true
+          sudo chown -R "$USER" "$RUNNER_TEMP/fs"; chmod -R u+rwX "$RUNNER_TEMP/fs"
+          f=$(find "$RUNNER_TEMP/fs" -type f | head -1)
+          [ -n "$f" ] || { echo "::error::no file: $(tail -c 3000 "$RUNNER_TEMP/fs.log" | tr '\n' ' ')"; exit 1; }
+          echo "file: $f"
+          python3 -I s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}"
