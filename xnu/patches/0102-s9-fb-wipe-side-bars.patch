@@ -1,0 +1,38 @@
+From 32adcb503bfa57b8c80622ccdb4e53d720b2237b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 17:28:49 +0100
+Subject: [PATCH] 0102
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 697e05b..aec5e07 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -132,6 +132,7 @@ public:
+ 	 */
+ 	bool          fScale;
+ 	bool          fCleared;
++	uint32_t      fBarTicks;      /* presents since the last side bar wipe */
+ 	uint32_t      fInv;           /* logical px per panel px, 16.16 */
+ 	int32_t       fDstX0, fDstW;  /* panel columns covered by the picture */
+ 
+@@ -409,6 +410,13 @@ AppleCLCD::present(const uint8_t *rec)
+ 		/* drop boot console text left in the side bars */
+ 		fCleared = true;
+ 		bzero((void *)fPixels, (size_t)fRowBytes * fHeight);
++	} else if (fScale && (++fBarTicks & 31) == 0) {
++		/* console lines printed later land in the side bars: wipe them now and then */
++		for (uint32_t y = 0; y < fHeight; y++) {
++			uint8_t *row = (uint8_t *)(fPixels + (uint64_t)y * fRowBytes);
++			bzero(row, (size_t)fDstX0 * 4);
++			bzero(row + (uint64_t)(fDstX0 + fDstW) * 4, (size_t)(fWidth - fDstX0 - fDstW) * 4);
++		}
+ 	}
+ 
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+-- 
+2.43.0
+
