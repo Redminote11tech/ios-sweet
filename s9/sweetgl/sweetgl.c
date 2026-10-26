@@ -56,6 +56,15 @@ renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc, struct rend
 	return NULL;
 }
 
+/* Mesa 25.0's st_api_create_context asks this (ST_MANAGER_BROKEN_INVALIDATE) */
+static int
+sweetgl_get_param(struct pipe_frontend_screen *fs, enum st_manager_param param)
+{
+	(void)fs;
+	(void)param;
+	return 0;
+}
+
 struct sweetgl_ctx {
 	struct st_context *st;
 	int api;
@@ -104,6 +113,7 @@ sweetgl_init(void)
 			} else {
 				fscreen = calloc(1, sizeof(*fscreen));
 				fscreen->screen = screen;
+				fscreen->get_param = sweetgl_get_param;
 				sweetgl_image_hooks(fscreen);  /* before any context: st checks them at creation */
 				sweet_drm_log("sweetgl: screen %s (%s)", screen->get_name(screen),
 				    screen->get_vendor(screen));
