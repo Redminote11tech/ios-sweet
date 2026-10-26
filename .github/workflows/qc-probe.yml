@@ -89,6 +89,6 @@ jobs:
           [ -n "$f" ] || { echo "::error::no file: $(tail -c 3000 "$RUNNER_TEMP/fs.log" | tr '\n' ' ')"; exit 1; }
           echo "file: $f"
           ls -la "$f"; file "$f"
-          python3 -I s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}" > "$RUNNER_TEMP/qf.log" 2>&1 \
+          python3 s9/tools/qc-file.py "$f" "${{ inputs.fsoffs }}" > "$RUNNER_TEMP/qf.log" 2>&1 \
             || { echo "::error::qc-file: $(tail -c 3000 "$RUNNER_TEMP/qf.log" | tr '\n' ' ')"; exit 1; }
           cat "$RUNNER_TEMP/qf.log"
