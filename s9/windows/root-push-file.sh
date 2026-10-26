@@ -23,14 +23,17 @@ padded=$(mktemp)
 cp "$FILES/$NAME" "$padded"
 truncate -s "$max" "$padded"
 # extents file: "file_block disk_start disk_end" (4 KiB blocks) per extent
+CHUNK=$HERE/root-chunk.bin
 while read -r off pstart pend; do
 	n=$((pend - pstart + 1))
-	dd if="$padded" bs=4096 skip="$off" count="$n" status=none |
-		"$ADB" exec-in "/tmp/s9io w $DEV $((pstart * 4096))"
-	want=$(dd if="$padded" bs=4096 skip="$off" count="$n" status=none | sha1sum | cut -d' ' -f1)
+	dd if="$padded" of="$CHUNK" bs=4096 skip="$off" count="$n" status=none
+	want=$(sha1sum < "$CHUNK" | cut -d' ' -f1)
+	"$ADB" push "$(wslpath -w "$CHUNK")" /tmp/root-chunk.bin </dev/null >/dev/null
+	"$ADB" shell "/tmp/s9io w $DEV $((pstart * 4096)) < /tmp/root-chunk.bin && rm /tmp/root-chunk.bin" </dev/null
 	got=$("$ADB" exec-out "/tmp/s9io r $DEV $((pstart * 4096)) $((n * 4096))" </dev/null | sha1sum | cut -d' ' -f1)
-	[ "$want" = "$got" ] || { echo "RESULT: VERIFY_FAILED at block $pstart"; rm -f "$padded"; exit 1; }
+	[ "$want" = "$got" ] || { echo "RESULT: VERIFY_FAILED at block $pstart"; rm -f "$padded" "$CHUNK"; exit 1; }
 done < "$EXT"
+rm -f "$CHUNK"
 rm -f "$padded"
 "$ADB" shell sync
 echo "RESULT: FILE_UPDATED $NAME ($size bytes)"

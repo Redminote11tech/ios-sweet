@@ -24,16 +24,20 @@ IMG=$WORK/phone-root.img
 MNT=/mnt/iosroot
 FILES=$HERE/rootfiles
 CH=$((1 << 20))
+RESUME=0
+[ "${1:-}" = "--writeback" ] && RESUME=1    # only redo step 3 from the last run's image
 mkdir -p "$WORK" "$MNT"
 [ -s "$FILES/install.txt" ] || { echo "no rootfiles/install.txt"; exit 1; }
 command -v fsck.hfsplus >/dev/null || apt-get install -y -q hfsprogs >/dev/null
 grep -qw hfsplus /proc/filesystems || modprobe hfsplus || { echo "RESULT: NO_HFSPLUS (run use-hfs-kernel.bat)"; exit 3; }
 
+if [ $RESUME = 0 ]; then
 free=$(df --output=avail -B1 "$WORK" | tail -1)
 [ -f "$IMG" ] && free=$((free + $(stat -c %s "$IMG")))
 if [ "$free" -lt $((SIZE + (1 << 30))) ]; then
 	echo "RESULT: NO_SPACE (WSL has $((free >> 30)) GiB free, needs 17)"
 	exit 1
+fi
 fi
 "$ADB" devices
 "$ADB" push "$(wslpath -w "$HERE/s9io")" /tmp/s9io >/dev/null
@@ -41,6 +45,7 @@ fi
 "$ADB" shell 'umount /data 2>/dev/null; umount /sdcard 2>/dev/null; umount /data/media 2>/dev/null; true'
 sig=$("$ADB" exec-out "dd if=$DEV bs=1024 skip=1 count=1 2>/dev/null" | head -c 2)
 [ "$sig" = "HX" ] || [ "$sig" = "H+" ] || { echo "RESULT: NO_IOS_ROOT_ON_USERDATA (signature '$sig')"; exit 1; }
+if [ $RESUME = 0 ]; then
 
 echo "=== $(date +%T) pulling the root from the phone (16 GiB, about 10-15 minutes)"
 rm -f "$IMG"
@@ -84,20 +89,28 @@ umount "$MNT"
 trap - EXIT
 fsck.hfsplus -fy "$IMG" || true
 fsck.hfsplus -fn "$IMG" || echo "warning: fsck still reports issues"
+fi
 
 echo "=== $(date +%T) writing back the changed chunks"
-hashes "$IMG" > "$WORK/after.sha1"
-paste -d' ' "$WORK/before.sha1" "$WORK/after.sha1" | awk '$1 != $2 { print NR - 1 }' > "$WORK/changed.txt"
-echo "changed chunks: $(wc -l < "$WORK/changed.txt") MiB"
-# runs of consecutive chunks, at most 64 per write
-awk 'NR == 1 { s = $1; p = $1; next }
-     $1 == p + 1 && $1 - s < 64 { p = $1; next }
-     { print s, p - s + 1; s = $1; p = $1 }
-     END { if (NR) print s, p - s + 1 }' "$WORK/changed.txt" > "$WORK/runs.txt"
+if [ $RESUME = 0 ]; then
+	hashes "$IMG" > "$WORK/after.sha1"
+	paste -d' ' "$WORK/before.sha1" "$WORK/after.sha1" | awk '$1 != $2 { print NR - 1 }' > "$WORK/changed.txt"
+	# runs of consecutive chunks, at most 16 MiB per write
+	awk 'NR == 1 { s = $1; p = $1; next }
+	     $1 == p + 1 && $1 - s < 16 { p = $1; next }
+	     { print s, p - s + 1; s = $1; p = $1 }
+	     END { if (NR) print s, p - s + 1 }' "$WORK/changed.txt" > "$WORK/runs.txt"
+fi
+echo "changed chunks: $(wc -l < "$WORK/changed.txt") MiB in $(wc -l < "$WORK/runs.txt") writes"
+# adb exec-in from WSL drops the end of its input (s9io-test2: 81916 of
+# 1048576 bytes arrived): push each piece as a file to TWRP's RAM /tmp,
+# write it from there, read it back through exec-out (reliable).
+CHUNK=$HERE/root-chunk.bin
 while read -r start count; do
-	dd if="$IMG" bs=$CH skip="$start" count="$count" status=none |
-		"$ADB" exec-in "/tmp/s9io w $DEV $((start * CH))"
-	want=$(dd if="$IMG" bs=$CH skip="$start" count="$count" status=none | sha1sum | cut -d' ' -f1)
+	dd if="$IMG" of="$CHUNK" bs=$CH skip="$start" count="$count" status=none
+	want=$(sha1sum < "$CHUNK" | cut -d' ' -f1)
+	"$ADB" push "$(wslpath -w "$CHUNK")" /tmp/root-chunk.bin </dev/null >/dev/null
+	"$ADB" shell "/tmp/s9io w $DEV $((start * CH)) < /tmp/root-chunk.bin && rm /tmp/root-chunk.bin" </dev/null
 	got=$("$ADB" exec-out "/tmp/s9io r $DEV $((start * CH)) $((count * CH))" </dev/null | sha1sum | cut -d' ' -f1)
 	if [ "$want" != "$got" ]; then
 		echo "RESULT: VERIFY_FAILED at MiB $start (+$count)"
@@ -105,5 +118,18 @@ while read -r start count; do
 	fi
 	echo "  MiB $start +$count ok"
 done < "$WORK/runs.txt"
+rm -f "$CHUNK"
 "$ADB" shell sync
+# disk extents of the installed files, for root-push-file.sh
+mount -t hfsplus -o loop,ro "$IMG" "$MNT"
+sed 's/\r$//' "$FILES/install.txt" | while read -r src dest mode; do
+	[ -n "$src" ] && [ "${src#\#}" = "$src" ] || continue
+	n=$(basename "$dest")
+	filefrag -v -b4096 "$MNT$dest" > "$FILES/filefrag-$n.txt" 2>&1 || true
+	awk '/^ *[0-9]+:/ { gsub(/\.\./," "); gsub(/:/," "); print $2, $4, $5 }' "$FILES/filefrag-$n.txt" > "$FILES/extents-$n.txt"
+	stat -c %s "$MNT$dest" > "$FILES/size-$n.txt"
+	echo "extents of $dest: $(wc -l < "$FILES/extents-$n.txt")"
+	head -5 "$FILES/filefrag-$n.txt"
+done
+umount "$MNT"
 echo "RESULT: ROOT_UPDATED"
