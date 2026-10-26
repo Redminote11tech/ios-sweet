@@ -1,0 +1,45 @@
+name: qc-probe
+# Finds QuartzCore GL renderer addresses (sweetgl texture-function fixes,
+# trace hooks) in the iPhone X iOS 16.7.16 dyld shared cache. Nothing from
+# the cache is committed or uploaded: results are reported as annotations.
+on:
+  workflow_dispatch:
+    inputs:
+      disass:
+        description: "symbols to disassemble (regex on the mangled name, comma separated)"
+        default: "create_shader"
+
+permissions:
+  contents: read
+
+env:
+  IPSW_URL: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: ipsw tool
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R blacktop/ipsw -p '*_linux_x86_64.tar.gz' -D /tmp/ipsw
+          tar -xzf /tmp/ipsw/*.tar.gz -C /tmp/ipsw
+          sudo install -m 755 "$(find /tmp/ipsw -type f -name ipsw | head -1)" /usr/local/bin/ipsw
+          ipsw version
+      - name: dyld shared cache
+        run: |
+          df -h /
+          mkdir -p "$RUNNER_TEMP/dsc"
+          ipsw extract --dyld --dyld-arch arm64 --remote "$IPSW_URL" -o "$RUNNER_TEMP/dsc" 2>&1 | tail -20 \
+            || ipsw extract --dyld --dyld-arch arm64 --remote "$IPSW_URL" -o "$RUNNER_TEMP/dsc"
+          find "$RUNNER_TEMP/dsc" -type f | head -40
+          cache=$(find "$RUNNER_TEMP/dsc" -type f -name 'dyld_shared_cache_arm64' | head -1)
+          [ -n "$cache" ] || { echo "::error::no cache extracted"; exit 1; }
+          echo "CACHE=$cache" >> "$GITHUB_ENV"
+      - name: probe
+        env:
+          DISASS: ${{ inputs.disass }}
+        run: python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
