@@ -44,12 +44,62 @@ def describe(c, va):
     return ''
 
 
+def stub_name(c, md, va, symcache, imgs):
+    """objc_msgSend$sel stubs -> '[sel]'; GOT stubs -> image symbol."""
+    code = c.read(va, 32)
+    if not code:
+        return ''
+    ins = list(md.disasm(code, va))
+    regs = {}
+    sel = None
+    for i in ins[:8]:
+        ops = i.operands
+        if i.mnemonic == 'adrp':
+            regs[ops[0].reg] = ops[1].imm
+        elif i.mnemonic.startswith('ldr') and len(ops) == 2 and ops[1].type == ARM64_OP_MEM and ops[1].mem.base in regs:
+            slot = regs[ops[1].mem.base] + ops[1].mem.disp
+            raw = c.read(slot, 8)
+            ptr = struct.unpack('<Q', raw)[0] & M if raw else 0
+            if i.op_str.startswith('x1,'):
+                sel = cstr(c, ptr)
+            elif i.op_str.startswith('x16,') or i.op_str.startswith('x17,'):
+                return f'[{sel}]' if sel else symbolize(c, ptr, symcache, imgs)
+        elif i.mnemonic in ('br', 'braa', 'brab', 'ret'):
+            break
+    return f'[{sel}]' if sel else ''
+
+
+def symbolize(c, va, symcache, imgs):
+    import re
+    import subprocess
+    img = next((i for i in imgs if i[0] <= va < i[0] + i[1]), None)
+    if img is None:
+        return f'{va:#x}'
+    name = os.path.basename(img[2])
+    if name not in symcache:
+        r = subprocess.run(['ipsw', 'dyld', 'symaddr', sys.argv[1], '--image', name], capture_output=True, text=True)
+        t = []
+        for l in r.stdout.splitlines():
+            m = re.match(r'\s*0x([0-9a-fA-F]+):\s+\(([^)]*)\)\s+(\S+)', l)
+            if m:
+                t.append((int(m.group(1), 16), m.group(3)))
+        symcache[name] = sorted(t)
+    best = None
+    for a, n in symcache[name]:
+        if a <= va:
+            best = (a, n)
+        else:
+            break
+    return f'{name}!{best[1]}+{va - best[0]:#x}' if best else name
+
+
 def main():
     c = Cache(sys.argv[1])
     imgs = images(sys.argv[1])
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     md.detail = True
     out = []
+    symcache = {}
     for spec in sys.argv[2].split():
         name, rest = spec.split(':')
         parts = [int(x, 0) for x in rest.split(',')]
@@ -73,7 +123,7 @@ def main():
                     and ops[1].mem.base in regs:
                 note = describe(c, regs[ops[1].mem.base] + ops[1].mem.disp)
             elif ins.mnemonic == 'bl':
-                note = f'-> {ops[0].imm:#x}'
+                note = f'-> {stub_name(c, md, ops[0].imm, symcache, imgs)}'
             mark = '>>' if ins.address == base + off else '  '
             out.append(f'{mark}+{ins.address - base:#07x} {ins.mnemonic} {ins.op_str}' + (f'   ; {note}' if note else ''))
     keep = out if os.environ.get('QC_ALL') else [l for l in out if l.startswith('---') or l.startswith('>>') or ';' in l
