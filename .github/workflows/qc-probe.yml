@@ -35,6 +35,7 @@ jobs:
           ipsw version
       - name: apfs-fuse
         run: |
+          sudo apt-get update -q >/dev/null
           sudo apt-get install -y -q apfs-fuse >/dev/null 2>&1 || true
           if ! command -v apfs-fuse >/dev/null; then
             sudo apt-get install -y -q cmake g++ libfuse3-dev fuse3 zlib1g-dev libbz2-dev libattr1-dev liblzma-dev >/dev/null
