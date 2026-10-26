@@ -1,0 +1,76 @@
+diff -ru a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+--- a/src/gallium/drivers/panfrost/pan_bo.c	2026-10-26 10:21:36.572730527 +0100
++++ b/src/gallium/drivers/panfrost/pan_bo.c	2026-10-26 10:21:50.741769004 +0100
+@@ -355,7 +355,12 @@
+    if (!bo->ptr.cpu)
+       return;
+ 
++#ifdef __APPLE__
++   /* iOS (s9/sweetgl): the mapping belongs to the kernel bo, freed with it */
++   if (0) {
++#else
+    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
++#endif
+       mesa_loge("munmap failed: %s", strerror(errno));
+       abort();
+    }
+diff -ru a/src/gallium/drivers/panfrost/pan_device.c b/src/gallium/drivers/panfrost/pan_device.c
+--- a/src/gallium/drivers/panfrost/pan_device.c	2026-10-26 10:21:36.581049219 +0100
++++ b/src/gallium/drivers/panfrost/pan_device.c	2026-10-26 10:21:36.597184278 +0100
+@@ -119,7 +119,12 @@
+ 
+    if (dev->arch < 10) {
+       dev->tiler_heap = panfrost_bo_create(
++#ifdef __APPLE__
++         /* no alloc-on-fault on iOS: the whole heap is wired memory */
++         dev, 32 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#else
+          dev, 128 * 1024 * 1024, PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
++#endif
+       if (!dev->tiler_heap)
+          goto err_free_kmod_dev;
+    }
+diff -ru a/src/panfrost/lib/kmod/pan_kmod.c b/src/panfrost/lib/kmod/pan_kmod.c
+--- a/src/panfrost/lib/kmod/pan_kmod.c	2026-10-26 10:21:36.563413320 +0100
++++ b/src/panfrost/lib/kmod/pan_kmod.c	2026-10-26 10:21:36.596971447 +0100
+@@ -176,7 +176,11 @@
+ 
+       p_atomic_inc(&bo->refcnt);
+    } else {
++#ifdef __APPLE__
++      size_t size = (size_t)sweet_drm_fd_size(fd);
++#else
+       size_t size = lseek(fd, 0, SEEK_END);
++#endif
+       if (size == 0 || size == (size_t)-1) {
+          mesa_loge("invalid dmabuf size");
+          goto err_close_handle;
+diff -ru a/src/panfrost/lib/kmod/pan_kmod.h b/src/panfrost/lib/kmod/pan_kmod.h
+--- a/src/panfrost/lib/kmod/pan_kmod.h	2026-10-26 10:21:36.552401053 +0100
++++ b/src/panfrost/lib/kmod/pan_kmod.h	2026-10-26 10:21:36.596780998 +0100
+@@ -34,6 +34,11 @@
+ 
+ #include "kmod/panthor_kmod.h"
+ 
++#ifdef __APPLE__
++void *sweet_drm_bo_map(int fd, uint64_t offset);
++int64_t sweet_drm_fd_size(int fd);
++#endif
++
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
+@@ -615,8 +620,13 @@
+    if (mmap_offset < 0)
+       return MAP_FAILED;
+ 
++#ifdef __APPLE__
++   /* iOS (s9/sweetgl): no DRM node, the kernel already mapped every bo */
++   host_addr = sweet_drm_bo_map(bo->dev->fd, mmap_offset + bo_offset);
++#else
+    host_addr = os_mmap(host_addr, size, prot, flags, bo->dev->fd,
+                        mmap_offset + bo_offset);
++#endif
+    if (host_addr == MAP_FAILED) {
+       mesa_loge("mmap(..., size=%zu, prot=%d, flags=0x%x) failed: %s",
+                 size, prot, flags, strerror(errno));

@@ -1,0 +1,144 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 68612db..01e674f 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -445,6 +445,78 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
+ 	return error;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * Boot-arg sweetenv=NAME:VAR=VAL[,VAR=VAL...] appends VAR=VAL to the
++ * environment of every executable whose file name is NAME, e.g.
++ * sweetenv=backboardd:CA_DISABLE_BACKDROP_CACHE=1 (CoreAnimation knobs
++ * without editing launchd.plist on the phone). Several NAME:... entries
++ * are separated by ';'.
++ */
++static int
++sweet_exec_env(struct image_params *imgp, int ptr_size)
++{
++	static char spec[512];
++	static int state;       /* 0 not parsed, 1 none, 2 set */
++	if (state == 0) {
++		state = PE_parse_boot_argn("sweetenv", spec, sizeof(spec)) && spec[0] ? 2 : 1;
++	}
++	if (state != 2) {
++		return 0;
++	}
++	const char *path = imgp->ip_strings + strlen("executable_path="), *base = path;
++	for (const char *c = path; *c; c++) {
++		if (*c == '/') {
++			base = c + 1;
++		}
++	}
++	const char *entry = spec;
++	for (;;) {
++		size_t n = 0;
++		while (entry[n] && entry[n] != ':' && entry[n] != ';') {
++			n++;
++		}
++		if (entry[n] == ':' && strlen(base) == n && strncmp(base, entry, n) == 0) {
++			break;
++		}
++		while (*entry && *entry != ';') {
++			entry++;
++		}
++		if (*entry == '\0') {
++			return 0;
++		}
++		entry++;
++	}
++	const char *p = strchr(entry, ':') + 1;
++	while (*p && *p != ';') {
++		char var[128];
++		size_t len = 0;
++		while (p[len] && p[len] != ',' && p[len] != ';') {
++			len++;
++		}
++		if (len > 0 && len < sizeof(var)) {
++			memcpy(var, p, len);
++			var[len] = '\0';
++			int error = exec_add_user_string(imgp, CAST_USER_ADDR_T(var), UIO_SYSSPACE, TRUE);
++			if (error) {
++				return error;
++			}
++			if (imgp->ip_argspace < ptr_size) {
++				return E2BIG;
++			}
++			imgp->ip_argspace -= ptr_size;
++			imgp->ip_envc++;
++			printf("SWEET ENV: %s += %s\n", base, var);
++		}
++		p += len;
++		if (*p == ',') {
++			p++;
++		}
++	}
++	return 0;
++}
++#endif
++
+ /*
+  * dyld is now passed the executable path as a getenv-like variable
+  * in the same fashion as the stack_guard and malloc_entropy keys.
+@@ -5741,6 +5813,13 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	error = sweet_exec_env(imgp, new_ptr_size);
++	if (error) {
++		goto bad;
++	}
++#endif
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..aa121aa 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -305,8 +305,33 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 	}
+ }
+ 
++/*
++ * Policy "AMFI" syscalls. dyld asks op 0x5a (amfi_check_dyld_policy_self,
++ * arg -> {u64 in_flags; u64 *out_flags}) which DYLD_* variables to honour;
++ * on failure it honours none, so DYLD_INSERT_LIBRARIES (sweetenv) was
++ * ignored. Allow @paths, path variables, fallback paths, print variables,
++ * failed insertions (a bad dylib must not kill backboardd) and interposing.
++ * Other ops fail as before (no policy).
++ */
++#define SWEET_AMFI_DYLD_FLAGS   0x7bull
++
++static int
++sweet_amfi_syscall(__unused struct proc *p, int call, user_addr_t arg)
++{
++	uint64_t a[2], flags = SWEET_AMFI_DYLD_FLAGS;
++
++	if (call != 0x5a) {
++		return ENOPOLICY;
++	}
++	if (copyin(arg, a, sizeof(a)) != 0 || a[1] == 0) {
++		return EFAULT;
++	}
++	return copyout(&flags, (user_addr_t)a[1], sizeof(flags));
++}
++
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++	.mpo_policy_syscall = sweet_amfi_syscall,
+ };
+ 
+ /*
+@@ -360,7 +385,7 @@ static struct mac_policy_conf sweet_sandbox_mac_conf = {
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
+-	.mpc_name = "SWEET AMFI",
++	.mpc_name = "AMFI",             /* __mac_syscall("AMFI", ...) finds it by name */
+ 	.mpc_fullname = "SWEET built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };

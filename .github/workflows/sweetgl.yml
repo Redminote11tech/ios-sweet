@@ -1,0 +1,79 @@
+name: sweetgl
+
+# Builds s9/sweetgl/sweetgl.dylib (Mesa panfrost for iOS, Galaxy S9 GPU
+# userland) from the Mesa tree in branch mesa-src (workflow mesa-src) plus
+# s9/sweetgl/mesa.patch. Results and logs go to the orphan branch
+# sweetgl-builds; on failure the log tail is also an annotation.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "s9/sweetgl/**"
+      - ".github/workflows/sweetgl.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: sweetgl
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mesa source
+        run: |
+          git fetch -q --depth 1 origin mesa-src
+          mkdir mesa && git archive FETCH_HEAD | tar -x -C mesa
+          cd mesa && git apply -v ../s9/sweetgl/mesa.patch
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tools
+        run: |
+          pip install -q meson ninja mako pyyaml packaging
+          brew install -q bison flex
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix flex)/bin" >> $GITHUB_PATH
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Meson build cache
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: mesa-ios-${{ hashFiles('s9/sweetgl/mesa.patch', 's9/sweetgl/build.sh', 's9/sweetgl/include/**') }}
+          restore-keys: mesa-ios-
+
+      - name: Build
+        run: |
+          set -o pipefail
+          mkdir -p out
+          sh s9/sweetgl/build.sh mesa build out 2>&1 | tee out/build.log || {
+            echo "::error::$(grep -E 'error|Error|ERROR|undefined|Undefined' out/build.log | tail -n 40 | tr '\n' '|' | cut -c1-4000)"
+            echo "::error::$(tail -n 30 out/build.log | tr '\n' '|' | cut -c1-4000)"
+            exit 1; }
+
+      - name: Publish to sweetgl-builds
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pub && cd pub
+          cp ../out/*.log ../out/libs.txt ../out/sweetgl.dylib . 2>/dev/null || true
+          [ -f build/meson-logs/meson-log.txt ] && tail -c 2000000 ../build/meson-logs/meson-log.txt > meson-log.txt || true
+          [ -f ../build/meson-logs/meson-log.txt ] && tail -c 2000000 ../build/meson-logs/meson-log.txt > meson-log.txt || true
+          echo "commit ${GITHUB_SHA}, run ${GITHUB_RUN_ID}, ${{ job.status }}" > BUILD.txt
+          git init -q -b sweetgl-builds
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "sweetgl build ${GITHUB_RUN_ID} (${{ job.status }})"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" sweetgl-builds:sweetgl-builds
