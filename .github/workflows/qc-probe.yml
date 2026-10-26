@@ -33,16 +33,29 @@ jobs:
           tar -xzf /tmp/ipsw/*.tar.gz -C /tmp/ipsw
           sudo install -m 755 "$(find /tmp/ipsw -type f -name ipsw | head -1)" /usr/local/bin/ipsw
           ipsw version
+      - name: apfs-fuse
+        run: |
+          sudo apt-get install -y -q apfs-fuse >/dev/null 2>&1 || true
+          if ! command -v apfs-fuse >/dev/null; then
+            sudo apt-get install -y -q cmake g++ libfuse3-dev fuse3 zlib1g-dev libbz2-dev libattr1-dev liblzma-dev >/dev/null
+            git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS="-include cstdint" -DCMAKE_C_FLAGS="-Wno-error" >/dev/null
+            make -C /tmp/apfs-fuse/build -j"$(nproc)" 2>&1 | grep -E "error|Error" || true
+            sudo install -m 755 /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
+          fi
+          command -v apfs-fuse
       - name: dyld shared cache
         run: |
           df -h /
           mkdir -p "$RUNNER_TEMP/dsc"
           ipsw extract --help 2>&1 | grep -iE "remote|dyld|output" | head -20
-          ipsw extract --dyld --dyld-arch arm64 --remote -o "$RUNNER_TEMP/dsc" "$IPSW_URL" > "$RUNNER_TEMP/ex.log" 2>&1 || true
+          sudo -E env PATH="$PATH" ipsw extract --dyld --dyld-arch arm64 --remote -o "$RUNNER_TEMP/dsc" "$IPSW_URL" > "$RUNNER_TEMP/ex.log" 2>&1 || true
           tail -c 3000 "$RUNNER_TEMP/ex.log"
           find "$RUNNER_TEMP/dsc" -type f | head -40
           cache=$(find "$RUNNER_TEMP/dsc" -type f -name 'dyld_shared_cache_arm64' | head -1)
           [ -n "$cache" ] || { echo "::error::no cache extracted: $(tail -c 3000 "$RUNNER_TEMP/ex.log" | tr '\n' ' ')"; exit 1; }
+          sudo chown -R "$USER" "$RUNNER_TEMP/dsc"
           echo "CACHE=$cache" >> "$GITHUB_ENV"
       - name: probe
         env:
