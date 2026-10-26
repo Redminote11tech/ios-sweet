@@ -1,0 +1,124 @@
+From 1272417c755507396337a563a5e0267fc9b2ce70 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 21:43:45 +0100
+Subject: [PATCH] 0103
+
+---
+ bsd/conf/files      |  1 +
+ bsd/dev/s9_power.c  | 71 +++++++++++++++++++++++++++++++++++++++++++++
+ bsd/dev/sweet_ufs.c |  2 ++
+ 3 files changed, 74 insertions(+)
+ create mode 100644 bsd/dev/s9_power.c
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 644bde9..bf6c47d 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,7 @@ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/s9_input.c			standard
+ bsd/dev/s9_mali.c			standard
++bsd/dev/s9_power.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/s9_power.c b/bsd/dev/s9_power.c
+new file mode 100644
+index 0000000..f1dd9cc
+--- /dev/null
++++ b/bsd/dev/s9_power.c
+@@ -0,0 +1,71 @@
++/*
++ * Galaxy S9 (Exynos 9810) restart and power off, for iOS's own controls
++ * (Settings > General > Shut Down, AssistiveTouch Restart, reboot(2)).
++ *
++ * As Samsung's drivers/soc/samsung/exynos-reboot.c (universal9810):
++ * PMU at 0x14060000; restart = SYSIP_DAT0 (+0x810, boot reason) 0 then
++ * SWRESET (+0x400) = 1; power off = PS_HOLD_CONTROL (+0x330c) bit 8
++ * cleared, the PMIC then cuts power (with a charger attached S-Boot
++ * starts its charging screen instead). Panic restarts are left alone so
++ * the panic screen stays readable. Only with the ADT's /s9-input node (an
++ * S9 image); boot-arg s9power=0 disables it.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++#define S9_PMU_BASE             0x14060000ULL
++#define S9_PMU_SIZE             0x4000
++#define S9_PMU_SWRESET          0x0400
++#define S9_PMU_SYSIP_DAT0       0x0810
++#define S9_PMU_PS_HOLD          0x330c
++
++#define PE_HALT_CPU             0       /* IOPlatformExpert.h kPEHaltCPU */
++#define PE_RESTART_CPU          1       /* kPERestartCPU */
++
++extern int (*PE_halt_restart)(unsigned int type);
++
++static volatile uint32_t *s9_pmu;
++
++void s9_power_init(void);
++
++static int
++s9_halt_restart(unsigned int type)
++{
++	if (s9_pmu == NULL || (type != PE_HALT_CPU && type != PE_RESTART_CPU)) {
++		return -1;
++	}
++	(void)ml_set_interrupts_enabled(FALSE);
++	if (type == PE_RESTART_CPU) {
++		printf("S9 POWER: restart\n");
++		s9_pmu[S9_PMU_SYSIP_DAT0 / 4] = 0;
++		__builtin_arm_dsb(0xf);
++		s9_pmu[S9_PMU_SWRESET / 4] = 1;
++	} else {
++		printf("S9 POWER: power off (PS_HOLD low)\n");
++		s9_pmu[S9_PMU_PS_HOLD / 4] = s9_pmu[S9_PMU_PS_HOLD / 4] & ~0x100u;
++	}
++	__builtin_arm_dsb(0xf);
++	for (;;) {
++		__builtin_arm_wfi();
++	}
++}
++
++void
++s9_power_init(void)
++{
++	DTEntry node;
++	uint32_t on = 1;
++	PE_parse_boot_argn("s9power", &on, sizeof(on));
++	if (!on || SecureDTLookupEntry(NULL, "/s9-input", &node) != kSuccess || PE_halt_restart != NULL) {
++		return;
++	}
++	s9_pmu = (volatile uint32_t *)ml_io_map(S9_PMU_BASE, S9_PMU_SIZE);
++	if (s9_pmu == NULL) {
++		return;
++	}
++	PE_halt_restart = s9_halt_restart;
++	printf("S9 POWER: restart/power off via PMU (PS_HOLD 0x%x)\n", s9_pmu[S9_PMU_PS_HOLD / 4]);
++}
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index aac0319..825b1a6 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -55,6 +55,7 @@ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ extern void s9_input_init(void);
+ extern void s9_mali_init(void);
++extern void s9_power_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -736,6 +737,7 @@ sweet_ufs_init(void)
+ 	sweet_usb_probe();
+ 	s9_input_init();          /* Galaxy S9 keys + touch (bsd/dev/s9_input.c), /s9-input only */
+ 	s9_mali_init();           /* Galaxy S9 Mali-G72 (bsd/dev/s9_mali.c), /s9-gpu only */
++	s9_power_init();          /* Galaxy S9 restart/power off (bsd/dev/s9_power.c) */
+ 	return 0;
+ }
+ 
+-- 
+2.43.0
+
