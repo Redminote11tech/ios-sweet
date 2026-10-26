@@ -1,0 +1,67 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index ef5fbcf..9841492 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -41,6 +41,22 @@ extern "C" void proc_selfname(char *buf, int size);
+ #define SWEET_GPU_CLIENT_BYTES  (768ull << 20)     /* own buffers per client */
+ 
+ extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
++extern "C" boolean_t pmap_valid_address(uint64_t addr);
++
++/*
++ * Physical cache maintenance only on kernel-managed RAM: phys flushes go
++ * through the physical aperture, which does not cover memory outside XNU's
++ * RAM such as the panel framebuffer at 0xcc000000 (a surface backboardd
++ * hands to the GPU: ios-ca2 panicked "phystokv_range: illegal PA
++ * 0xcc000000"). The kernel maps that memory uncached anyway.
++ */
++static void
++flush_pa(uint64_t pa)
++{
++	if (pmap_valid_address(pa)) {
++		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++	}
++}
+ extern "C" boolean_t pmap_is_modified(ppnum_t pn);
+ extern "C" void pmap_clear_modify(ppnum_t pn);
+ extern "C" boolean_t pmap_valid_page(ppnum_t pn);
+@@ -58,10 +74,10 @@ flush_if_written(uint64_t pa)
+ {
+ 	ppnum_t pn = (ppnum_t)(pa >> PAGE_SHIFT);
+ 	if (!pmap_valid_page(pn)) {             /* not managed: no modified bit, always */
+-		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++		flush_pa(pa);
+ 	} else if (pmap_is_modified(pn)) {
+ 		pmap_clear_modify(pn);
+-		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++		flush_pa(pa);
+ 	}
+ }
+ 
+@@ -264,7 +280,7 @@ SweetGPUUserClient::boNew(uint64_t size, uint32_t flags, uint64_t *out)
+ 		ok = pa[p] != 0 && (pa[p] & PAGE_MASK) == 0 && seg >= PAGE_SIZE;
+ 		if (ok) {
+ 			/* zeroed through the cached kernel alias: push it out, drop the lines */
+-			flush_dcache64((addr64_t)pa[p], PAGE_SIZE, TRUE);
++			flush_pa(pa[p]);
+ 		}
+ 	}
+ 	uint64_t gva = ok ? s9_mali_vm_map(pa, npages, flags & S9_MALI_MAP_NOEXEC) : 0;
+@@ -321,7 +337,7 @@ SweetGPUUserClient::boImport(uint32_t id, uint64_t *out)
+ 			if (pmap_valid_page((ppnum_t)(pa[p] >> PAGE_SHIFT))) {
+ 				pmap_clear_modify((ppnum_t)(pa[p] >> PAGE_SHIFT));
+ 			}
+-			flush_dcache64((addr64_t)pa[p], PAGE_SIZE, TRUE);
++			flush_pa(pa[p]);
+ 		}
+ 	}
+ 	uint64_t gva = ok ? s9_mali_vm_map(pa, npages, S9_MALI_MAP_NOEXEC) : 0;
+@@ -455,7 +471,7 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 			ret = b == NULL ? kIOReturnNotFound :
+ 			    b->used && s9_mali_wait(b->last_seq, 0) != 0 ? kIOReturnBusy : kIOReturnSuccess;
+ 			for (uint32_t p = 0; ret == kIOReturnSuccess && p < b->npages; p++) {
+-				flush_dcache64((addr64_t)b->pa[p], PAGE_SIZE, TRUE);
++				flush_pa(b->pa[p]);
+ 			}
+ 		}
+ 		break;
