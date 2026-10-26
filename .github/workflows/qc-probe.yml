@@ -11,6 +11,9 @@ on:
       delta:
         description: "offset from the ios-sailfish addresses to check"
         default: "0x4000"
+      sym:
+        description: "unslid shared-cache addresses to symbolicate (space separated)"
+        default: ""
 
 permissions:
   contents: read
@@ -66,4 +69,5 @@ jobs:
           DISASS: ${{ inputs.disass }}
         run: |
           python3 -I s9/tools/qc-verify.py "$CACHE" "${{ inputs.delta || '0x4000' }}"
+          [ -z "${{ inputs.sym }}" ] || python3 -I s9/tools/qc-sym.py "$CACHE" "${{ inputs.sym }}"
           [ -z "$DISASS" ] || python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
