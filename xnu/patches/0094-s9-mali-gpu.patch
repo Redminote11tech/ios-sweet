@@ -1,0 +1,1222 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 1ffbff3..644bde9 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/s9_input.c			standard
++bsd/dev/s9_mali.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/s9_mali.c b/bsd/dev/s9_mali.c
+new file mode 100644
+index 0000000..4365d5d
+--- /dev/null
++++ b/bsd/dev/s9_mali.c
+@@ -0,0 +1,618 @@
++/*
++ * Galaxy S9 (Exynos 9810) Mali-G72 MP18 (Bifrost, job manager) bring-up.
++ * Kernel API: bsd/dev/s9_mali.h. Enabled by the ADT node /s9-gpu
++ * (s9/tools/mkadt_s9.py); boot-arg s9gpu=0 turns it off.
++ *
++ * What the shim's GPU probe (s9/shim t7) established and this repeats:
++ *  - S-Boot leaves the G3D power domain on (PMU 0x14064044 & 0xf == 0xf)
++ *    with CMU_G3D on its PLL; the TZPC for G3D is restored with SMC
++ *    0x82000410 (1, 0x17410204, 2).
++ *  - L2, tiler and shader cores power up through *_PWRON (0x1a0, 0x190,
++ *    0x180) and report through *_READY.
++ *  - AS0 in AArch64 4K format (TRANSCFG ADRMODE 6), MEMATTR 0x4c (inner
++ *    and outer non-cacheable), descriptors AF | SH inner | AP unpriv rw.
++ *  - A WRITE_VALUE job on JS1 with CONFIG AS0 | clean+invalidate at start
++ *    and end ran in 23 us.
++ *
++ * The GPU is not IO-coherent: it maps everything non-cacheable, and the
++ * CPU side cleans/invalidates (page tables here, buffers in SweetGPU.cpp).
++ * Everything is polled: no interrupts are routed.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++#include <machine/atomic.h>
++#include "s9_mali.h"
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++
++/* GPU control */
++#define GPU_ID                  0x000
++#define GPU_IRQ_RAWSTAT         0x020
++#define GPU_IRQ_CLEAR           0x024
++#define GPU_IRQ_MASK            0x028
++#define GPU_COMMAND             0x030
++#define GPU_STATUS              0x034
++#define GPU_FAULTSTATUS         0x03c
++#define GPU_FAULTADDRESS        0x040
++#define SHADER_PRESENT          0x100
++#define TILER_PRESENT           0x110
++#define L2_PRESENT              0x120
++#define SHADER_READY            0x140
++#define TILER_READY             0x150
++#define L2_READY                0x160
++#define SHADER_PWRON            0x180
++#define TILER_PWRON             0x190
++#define L2_PWRON                0x1a0
++#define GPU_CMD_SOFT_RESET      1u
++#define GPU_IRQ_RESET_DONE      (1u << 8)
++
++/* job control */
++#define JOB_IRQ_RAWSTAT         0x1000
++#define JOB_IRQ_CLEAR           0x1004
++#define JOB_IRQ_MASK            0x1008
++#define JS(n)                   (0x1800 + (n) * 0x80)
++#define JS_HEAD                 0x00
++#define JS_STATUS               0x24
++#define JS_COMMAND              0x20
++#define JS_HEAD_NEXT            0x40
++#define JS_AFFINITY_NEXT        0x50
++#define JS_CONFIG_NEXT          0x58
++#define JS_COMMAND_NEXT         0x60
++#define JS_CMD_START            1u
++#define JS_CMD_HARD_STOP        3u
++#define JS_CONFIG               (0u /* AS0 */ | 3u << 8 | 3u << 12 | 8u << 16)
++
++/* MMU */
++#define MMU_IRQ_RAWSTAT         0x2000
++#define MMU_IRQ_CLEAR           0x2004
++#define MMU_IRQ_MASK            0x2008
++#define AS0                     0x2400
++#define AS_TRANSTAB             0x00
++#define AS_MEMATTR              0x08
++#define AS_LOCKADDR             0x10
++#define AS_COMMAND              0x18
++#define AS_FAULTSTATUS          0x1c
++#define AS_FAULTADDRESS         0x20
++#define AS_STATUS               0x28
++#define AS_TRANSCFG             0x30
++#define AS_CMD_UPDATE           1u
++#define AS_CMD_LOCK             2u
++#define AS_CMD_FLUSH_PT         4u
++#define AS_TRANSCFG_VALUE       (6u | (55u - 48u) << 6 | 1u << 24 /* PTW non-cacheable */)
++
++#define PTE_BLOCK_OR_PAGE       0x3ull          /* level 3 page / table */
++#define PTE_AF                  (1ull << 10)
++#define PTE_SH_INNER            (3ull << 8)
++#define PTE_AP_UNPRIV           (1ull << 6)
++#define PTE_AP_RDONLY           (1ull << 7)
++#define PTE_XN                  (1ull << 54)
++#define GPU_PAGE                4096u
++
++#define PT_POOL_SIZE            (4u << 20)      /* 1024 tables of 4 KiB */
++#define VA_SLOTS                ((S9_MALI_VA_END - S9_MALI_VA_BASE) / PAGE_SIZE)
++
++static LCK_GRP_DECLARE(s9_mali_grp, "s9_mali");
++static LCK_MTX_DECLARE(s9_mali_vm_lock, &s9_mali_grp);
++static LCK_MTX_DECLARE(s9_mali_job_lock, &s9_mali_grp);
++
++static struct {
++	vm_offset_t regs;
++	bool ready;
++	uint64_t shader_present;
++	/* page tables: a contiguous pool, 4 KiB tables, bump allocated */
++	vm_offset_t pool;
++	uint64_t pool_pa;
++	uint32_t pool_used;
++	uint64_t l0_pa;
++	/* VA: one bit per PAGE_SIZE slot of [VA_BASE, VA_END) */
++	uint8_t vabits[VA_SLOTS / 8];
++	uint32_t rover;
++	/* jobs: one chain in flight */
++	uint32_t issued, done;
++	int busy_slot;                  /* -1: idle */
++	uint64_t busy_since;
++	uint32_t faults;
++} m = { .busy_slot = -1 };
++
++/* VA allocation sizes: slot -> pages (incl. guard), for unmap */
++static uint16_t valen[VA_SLOTS];
++
++static inline uint32_t
++rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(m.regs + off);
++}
++
++static inline void
++wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(m.regs + off) = v;
++}
++
++static inline void
++wr64(uint32_t off, uint64_t v)
++{
++	wr(off, (uint32_t)v);
++	wr(off + 4, (uint32_t)(v >> 32));
++}
++
++static uint64_t
++now_us(void)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000;
++}
++
++static bool
++wait_bits(uint32_t off, uint32_t mask, uint32_t want, uint32_t us)
++{
++	uint64_t t0 = now_us();
++	while ((rd(off) & mask) != want) {
++		if (now_us() - t0 > us) {
++			return false;
++		}
++	}
++	return true;
++}
++
++/* ------------------------------------------------------------- page tables */
++
++static uint64_t
++pt_alloc(void)
++{
++	if (m.pool_used + GPU_PAGE > PT_POOL_SIZE) {
++		return 0;
++	}
++	uint64_t pa = m.pool_pa + m.pool_used;
++	m.pool_used += GPU_PAGE;
++	/* pool was zeroed at allocation and flushed */
++	return pa;
++}
++
++static inline uint64_t *
++pt_kva(uint64_t pa)
++{
++	return (uint64_t *)(m.pool + (pa - m.pool_pa));
++}
++
++/* Level 3 entry for va, allocating tables on the way; NULL if out of pool. */
++static uint64_t *
++pte_for(uint64_t va, bool alloc)
++{
++	uint64_t t = m.l0_pa;
++	for (int lvl = 0; lvl < 3; lvl++) {
++		uint64_t *e = pt_kva(t) + ((va >> (39 - 9 * lvl)) & 511);
++		if (!(*e & 1)) {
++			if (!alloc) {
++				return NULL;
++			}
++			uint64_t n = pt_alloc();
++			if (n == 0) {
++				return NULL;
++			}
++			*e = n | 3;
++			flush_dcache64((addr64_t)(m.pool_pa + ((uintptr_t)e - m.pool)), 8, TRUE);
++		}
++		t = *e & 0x0000fffffffff000ull;
++	}
++	return pt_kva(t) + ((va >> 12) & 511);
++}
++
++static void
++pte_flush(uint64_t *first, uint32_t count)
++{
++	flush_dcache64((addr64_t)(m.pool_pa + ((uintptr_t)first - m.pool)), count * 8, TRUE);
++}
++
++/* Make AS0 drop cached translations (whole 4 GiB: lock region width 31). */
++static void
++as_flush(void)
++{
++	wr64(AS0 + AS_LOCKADDR, 31);
++	wr(AS0 + AS_COMMAND, AS_CMD_LOCK);
++	wait_bits(AS0 + AS_STATUS, 1, 0, 10000);
++	wr(AS0 + AS_COMMAND, AS_CMD_FLUSH_PT);
++	if (!wait_bits(AS0 + AS_STATUS, 1, 0, 10000)) {
++		printf("S9 MALI: AS0 flush timeout, status 0x%x\n", rd(AS0 + AS_STATUS));
++	}
++}
++
++static bool
++vabit(uint32_t i)
++{
++	return m.vabits[i / 8] & (1u << (i % 8));
++}
++
++static void
++vabit_set(uint32_t i, bool v)
++{
++	if (v) {
++		m.vabits[i / 8] |= (uint8_t)(1u << (i % 8));
++	} else {
++		m.vabits[i / 8] &= (uint8_t)~(1u << (i % 8));
++	}
++}
++
++uint64_t
++s9_mali_vm_map(const uint64_t *pa, uint32_t npages, uint32_t flags)
++{
++	if (!m.ready || npages == 0 || npages + 1 > VA_SLOTS || npages + 1 > UINT16_MAX) {
++		return 0;
++	}
++	uint32_t need = npages + 1;     /* guard page */
++	lck_mtx_lock(&s9_mali_vm_lock);
++	/* first fit from the rover, wrapping once */
++	uint32_t start = UINT32_MAX;
++	for (uint32_t pass = 0; pass < 2 && start == UINT32_MAX; pass++) {
++		uint32_t i = pass ? 0 : m.rover, run = 0;
++		uint32_t end = pass ? m.rover + need : (uint32_t)VA_SLOTS;
++		if (end > VA_SLOTS) {
++			end = VA_SLOTS;
++		}
++		for (; i < end; i++) {
++			run = vabit(i) ? 0 : run + 1;
++			if (run == need) {
++				start = i + 1 - need;
++				break;
++			}
++		}
++	}
++	if (start == UINT32_MAX) {
++		lck_mtx_unlock(&s9_mali_vm_lock);
++		printf("S9 MALI: out of GPU VA (%u pages)\n", npages);
++		return 0;
++	}
++	uint64_t va = S9_MALI_VA_BASE + (uint64_t)start * PAGE_SIZE;
++	uint64_t attr = PTE_BLOCK_OR_PAGE | PTE_AF | PTE_SH_INNER | PTE_AP_UNPRIV |
++	    ((flags & S9_MALI_MAP_READONLY) ? PTE_AP_RDONLY : 0) |
++	    ((flags & S9_MALI_MAP_NOEXEC) ? PTE_XN : 0);
++	for (uint32_t p = 0; p < npages; p++) {
++		for (uint32_t k = 0; k < PAGE_SIZE / GPU_PAGE; k++) {
++			uint64_t gva = va + (uint64_t)p * PAGE_SIZE + k * GPU_PAGE;
++			uint64_t *e = pte_for(gva, true);
++			if (e == NULL) {
++				/* out of table pool: undo what was mapped */
++				for (uint64_t u = va; u < gva; u += GPU_PAGE) {
++					uint64_t *x = pte_for(u, false);
++					if (x != NULL) {
++						*x = 0;
++						pte_flush(x, 1);
++					}
++				}
++				as_flush();
++				lck_mtx_unlock(&s9_mali_vm_lock);
++				printf("S9 MALI: page-table pool exhausted\n");
++				return 0;
++			}
++			*e = (pa[p] + k * GPU_PAGE) | attr;
++			pte_flush(e, 1);
++		}
++	}
++	for (uint32_t i = 0; i < need; i++) {
++		vabit_set(start + i, true);
++	}
++	valen[start] = (uint16_t)need;
++	m.rover = start + need < VA_SLOTS ? start + need : 0;
++	as_flush();
++	lck_mtx_unlock(&s9_mali_vm_lock);
++	return va;
++}
++
++void
++s9_mali_vm_unmap(uint64_t va)
++{
++	if (va < S9_MALI_VA_BASE || va >= S9_MALI_VA_END || (va & PAGE_MASK)) {
++		return;
++	}
++	uint32_t start = (uint32_t)((va - S9_MALI_VA_BASE) / PAGE_SIZE);
++	lck_mtx_lock(&s9_mali_vm_lock);
++	uint32_t need = valen[start];
++	if (need == 0) {
++		lck_mtx_unlock(&s9_mali_vm_lock);
++		printf("S9 MALI: unmap of unknown VA 0x%llx\n", va);
++		return;
++	}
++	for (uint64_t u = va; u < va + (uint64_t)(need - 1) * PAGE_SIZE; u += GPU_PAGE) {
++		uint64_t *e = pte_for(u, false);
++		if (e != NULL) {
++			*e = 0;
++			pte_flush(e, 1);
++		}
++	}
++	as_flush();
++	for (uint32_t i = 0; i < need; i++) {
++		vabit_set(start + i, false);
++	}
++	valen[start] = 0;
++	lck_mtx_unlock(&s9_mali_vm_lock);
++}
++
++/* -------------------------------------------------------------------- jobs */
++
++static void
++log_fault(const char *what, int slot)
++{
++	m.faults++;
++	if (m.faults > 50) {
++		return;
++	}
++	printf("S9 MALI: %s: JS%d status 0x%x head 0x%x%08x, AS0 fault 0x%x addr 0x%x%08x, "
++	    "GPU fault 0x%x, MMU irq 0x%x\n", what, slot,
++	    rd(JS(slot) + JS_STATUS), rd(JS(slot) + JS_HEAD + 4), rd(JS(slot) + JS_HEAD),
++	    rd(AS0 + AS_FAULTSTATUS), rd(AS0 + AS_FAULTADDRESS + 4), rd(AS0 + AS_FAULTADDRESS),
++	    rd(GPU_FAULTSTATUS), rd(MMU_IRQ_RAWSTAT));
++}
++
++/* Job lock held: retire the chain in flight if the hardware says it ended. */
++static void
++poll_locked(void)
++{
++	if (m.busy_slot < 0) {
++		return;
++	}
++	int s = m.busy_slot;
++	uint32_t raw = rd(JOB_IRQ_RAWSTAT);
++	uint32_t bits = (1u << s) | (1u << (16 + s));
++	if (!(raw & bits)) {
++		return;
++	}
++	if (raw & (1u << (16 + s))) {
++		log_fault("job failed", s);
++		wr(MMU_IRQ_CLEAR, 0xffffffff);
++	}
++	wr(JOB_IRQ_CLEAR, bits);
++	m.done = m.issued;
++	m.busy_slot = -1;
++}
++
++/* Job lock held: stop a chain that ran too long. */
++static void
++stop_locked(void)
++{
++	int s = m.busy_slot;
++	log_fault("job timeout, hard stop", s);
++	wr(JS(s) + JS_COMMAND, JS_CMD_HARD_STOP);
++	uint64_t t0 = now_us();
++	while (!(rd(JOB_IRQ_RAWSTAT) & ((1u << s) | (1u << (16 + s)))) && now_us() - t0 < 100000) {
++	}
++	wr(JOB_IRQ_CLEAR, (1u << s) | (1u << (16 + s)));
++	wr(MMU_IRQ_CLEAR, 0xffffffff);
++	m.done = m.issued;
++	m.busy_slot = -1;
++}
++
++int
++s9_mali_submit(uint64_t jc, uint32_t requirements, uint32_t *seqno)
++{
++	if (!m.ready) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&s9_mali_job_lock);
++	poll_locked();
++	while (m.busy_slot >= 0) {
++		if (now_us() - m.busy_since > 2000000) {
++			stop_locked();      /* the earlier chain is lost; this one still runs */
++			break;
++		}
++		lck_mtx_unlock(&s9_mali_job_lock);
++		delay(20);
++		lck_mtx_lock(&s9_mali_job_lock);
++		poll_locked();
++	}
++	int s = (requirements & S9_MALI_REQ_FS) ? 0 : 1;
++	wr64(JS(s) + JS_HEAD_NEXT, jc);
++	wr64(JS(s) + JS_AFFINITY_NEXT, m.shader_present);
++	wr(JS(s) + JS_CONFIG_NEXT, JS_CONFIG);
++	wr(JS(s) + JS_COMMAND_NEXT, JS_CMD_START);
++	m.busy_slot = s;
++	m.busy_since = now_us();
++	*seqno = ++m.issued;
++	lck_mtx_unlock(&s9_mali_job_lock);
++	return 0;
++}
++
++int
++s9_mali_wait(uint32_t seqno, uint32_t timeout_ms)
++{
++	if (!m.ready) {
++		return ENXIO;
++	}
++	uint64_t t0 = now_us();
++	for (uint32_t spins = 0;; spins++) {
++		lck_mtx_lock(&s9_mali_job_lock);
++		poll_locked();
++		if (m.busy_slot >= 0 && now_us() - m.busy_since > 2000000) {
++			stop_locked();
++		}
++		bool done = (int32_t)(m.done - seqno) >= 0;
++		lck_mtx_unlock(&s9_mali_job_lock);
++		if (done) {
++			return 0;
++		}
++		if (now_us() - t0 >= (uint64_t)timeout_ms * 1000) {
++			return ETIMEDOUT;
++		}
++		if (spins > 100) {
++			delay(50);
++		}
++	}
++}
++
++int
++s9_mali_read_reg(uint32_t offset, uint32_t *value)
++{
++	if (m.regs == 0 || offset >= 0x400 || (offset & 3)) {
++		return EINVAL;
++	}
++	*value = rd(offset);
++	return 0;
++}
++
++bool
++s9_mali_ready(void)
++{
++	return m.ready;
++}
++
++/* -------------------------------------------------------------------- init */
++
++static uint64_t
++smc4(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
++{
++	register uint64_t x0 __asm__("x0") = fn;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = a3;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++                     "x14", "x15", "x16", "x17", "memory");
++	return x0;
++}
++
++static bool
++hw_up(void)
++{
++	uint64_t sp = rd(SHADER_PRESENT) | (uint64_t)rd(SHADER_PRESENT + 4) << 32;
++	uint32_t tp = rd(TILER_PRESENT), lp = rd(L2_PRESENT);
++	m.shader_present = sp;
++	wr(GPU_IRQ_MASK, 0);
++	wr(JOB_IRQ_MASK, 0);
++	wr(MMU_IRQ_MASK, 0);
++	wr(L2_PWRON, lp);
++	if (!wait_bits(L2_READY, lp, lp, 20000)) {
++		printf("S9 MALI: L2 not ready (0x%x)\n", rd(L2_READY));
++		return false;
++	}
++	wr(TILER_PWRON, tp);
++	wr(SHADER_PWRON, (uint32_t)sp);
++	wr(SHADER_PWRON + 4, (uint32_t)(sp >> 32));
++	if (!wait_bits(TILER_READY, tp, tp, 20000) || !wait_bits(SHADER_READY, (uint32_t)sp, (uint32_t)sp, 20000)) {
++		printf("S9 MALI: cores not ready (tiler 0x%x shader 0x%x)\n", rd(TILER_READY), rd(SHADER_READY));
++		return false;
++	}
++	wr64(AS0 + AS_TRANSTAB, m.l0_pa);
++	wr64(AS0 + AS_MEMATTR, 0x4c4c4c4c4c4c4c4cULL);
++	wr64(AS0 + AS_TRANSCFG, AS_TRANSCFG_VALUE);
++	wr(AS0 + AS_COMMAND, AS_CMD_UPDATE);
++	if (!wait_bits(AS0 + AS_STATUS, 1, 0, 10000)) {
++		printf("S9 MALI: AS0 update timeout\n");
++		return false;
++	}
++	wr(JOB_IRQ_CLEAR, 0xffffffff);
++	wr(MMU_IRQ_CLEAR, 0xffffffff);
++	wr(GPU_IRQ_CLEAR, 0xffffffff);
++	return true;
++}
++
++/* WRITE_VALUE job through a fresh GPU VA mapping: proves MMU + job path. */
++static bool
++self_test(void)
++{
++	vm_offset_t kva = 0;
++	if (kmem_alloc_contig(kernel_map, &kva, PAGE_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return false;
++	}
++	uint64_t pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)kva));
++	uint64_t va = s9_mali_vm_map(&pa, 1, 0);
++	bool ok = false;
++	if (va != 0) {
++		volatile uint32_t *j = (volatile uint32_t *)kva;
++		/* header (32 bytes) + write-value payload; target at +0x100 */
++		j[4] = 1u | 2u << 1 | 1u << 16;                 /* 64-bit, WRITE_VALUE, index 1 */
++		*(volatile uint64_t *)(kva + 0x20) = va + 0x100;
++		j[0x28 / 4] = 6;                                /* immediate 32 */
++		*(volatile uint64_t *)(kva + 0x30) = 0x5ec0ffee;
++		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++		uint32_t seq;
++		uint64_t t0 = now_us();
++		if (s9_mali_submit(va, 0, &seq) == 0 && s9_mali_wait(seq, 1000) == 0) {
++			flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++			uint32_t got = *(volatile uint32_t *)(kva + 0x100);
++			ok = got == 0x5ec0ffee;
++			printf("S9 MALI: self-test %s (got 0x%x, job status 0x%x, %llu us)\n",
++			    ok ? "OK" : "FAILED", got, j[0], now_us() - t0);
++		} else {
++			printf("S9 MALI: self-test job never finished\n");
++		}
++		s9_mali_vm_unmap(va);
++	}
++	kmem_free(kernel_map, kva, PAGE_SIZE);
++	return ok;
++}
++
++static void
++s9_mali_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	uint32_t id = rd(GPU_ID);
++	uint64_t r = smc4(0x82000410ULL, 1, 0x17410204ULL, 2);  /* G3D TZPC restore */
++	printf("S9 MALI: GPU_ID 0x%x, shader 0x%x, TZPC smc %lld\n", id, rd(SHADER_PRESENT), (long long)r);
++	if ((id >> 16) != 0x6221) {
++		printf("S9 MALI: not a Mali-G72 (power domain off?), giving up\n");
++		return;
++	}
++	if (!hw_up()) {
++		return;
++	}
++	m.ready = true;
++	if (!self_test()) {
++		m.ready = false;
++		printf("S9 MALI: disabled\n");
++		return;
++	}
++	printf("S9 MALI: ready, GPU VA 0x%llx-0x%llx\n", S9_MALI_VA_BASE, S9_MALI_VA_END);
++}
++
++void s9_mali_init(void);
++
++void
++s9_mali_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	uint32_t on = 1;
++	PE_parse_boot_argn("s9gpu", &on, sizeof(on));
++	if (!on || SecureDTLookupEntry(NULL, "/s9-gpu", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		return;
++	}
++	m.regs = ml_io_map(reg[0], reg[1]);
++	if (kmem_alloc_contig(kernel_map, &m.pool, PT_POOL_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("S9 MALI: no page-table memory\n");
++		return;
++	}
++	m.pool_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)m.pool));
++	/* contiguous: check the last page too */
++	if (ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)(m.pool + PT_POOL_SIZE - PAGE_SIZE))) !=
++	    m.pool_pa + PT_POOL_SIZE - PAGE_SIZE) {
++		printf("S9 MALI: page-table pool not contiguous\n");
++		return;
++	}
++	flush_dcache64((addr64_t)m.pool_pa, PT_POOL_SIZE, TRUE);
++	m.l0_pa = pt_alloc();
++	thread_t t;
++	if (kernel_thread_start(s9_mali_thread, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/s9_mali.h b/bsd/dev/s9_mali.h
+new file mode 100644
+index 0000000..fed9689
+--- /dev/null
++++ b/bsd/dev/s9_mali.h
+@@ -0,0 +1,56 @@
++/*
++ * Galaxy S9 (Exynos 9810) Mali-G72 MP18 kernel API (bsd/dev/s9_mali.c),
++ * used by the SweetGPU user client (iokit/Kernel/arm/SweetGPU.cpp).
++ *
++ * One GPU address space (AS0) shared by every client, GPU VAs in
++ * [S9_MALI_VA_BASE, S9_MALI_VA_END). Job chains run one at a time, in
++ * submission order, on JS0 (fragment) or JS1 (everything else).
++ */
++#ifndef _S9_MALI_H
++#define _S9_MALI_H
++
++#include <sys/cdefs.h>
++#include <stdint.h>
++#include <stdbool.h>
++
++__BEGIN_DECLS
++
++#define S9_MALI_VA_BASE         0x02000000ULL           /* 32 MiB, as panfrost */
++#define S9_MALI_VA_END          0x42000000ULL           /* + 1 GiB */
++
++#define S9_MALI_MAP_READONLY    1u
++#define S9_MALI_MAP_NOEXEC      2u
++
++#define S9_MALI_REQ_FS          1u                      /* fragment job chain: JS0 */
++
++/* True once the GPU is powered, AS0 is set up and the self-test passed. */
++bool s9_mali_ready(void);
++
++/*
++ * Map npages kernel pages (PAGE_SIZE each, physical addresses in pa[]) at
++ * a new GPU VA, followed by one unmapped guard page; 0 on failure.
++ */
++uint64_t s9_mali_vm_map(const uint64_t *pa, uint32_t npages, uint32_t flags);
++
++/* Unmap a VA returned by s9_mali_vm_map. */
++void s9_mali_vm_unmap(uint64_t va);
++
++/*
++ * Run the job chain whose first descriptor is at GPU VA jc. Returns 0 and
++ * its sequence number, or ENXIO (GPU off). A previous chain still running
++ * after 2 s is hard-stopped first (logged).
++ */
++int s9_mali_submit(uint64_t jc, uint32_t requirements, uint32_t *seqno);
++
++/*
++ * Wait until chain seqno has finished: 0 (done; also when it faulted, see
++ * the log), ETIMEDOUT after timeout_ms (0: just poll), ENXIO (GPU off).
++ */
++int s9_mali_wait(uint32_t seqno, uint32_t timeout_ms);
++
++/* GPU control register (offset < 0x400, 4-byte aligned), for GET_PARAM. */
++int s9_mali_read_reg(uint32_t offset, uint32_t *value);
++
++__END_DECLS
++
++#endif /* _S9_MALI_H */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index c11d906..aac0319 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -54,6 +54,7 @@ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ extern void s9_input_init(void);
++extern void s9_mali_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -734,6 +735,7 @@ sweet_ufs_init(void)
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
+ 	s9_input_init();          /* Galaxy S9 keys + touch (bsd/dev/s9_input.c), /s9-input only */
++	s9_mali_init();           /* Galaxy S9 Mali-G72 (bsd/dev/s9_mali.c), /s9-gpu only */
+ 	return 0;
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+new file mode 100644
+index 0000000..ef5fbcf
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -0,0 +1,470 @@
++/*
++ * SweetGPU: user client for the Galaxy S9 Mali-G72 (bsd/dev/s9_mali.c,
++ * kernel API in bsd/dev/s9_mali.h; ADT /s9-gpu). Buffer objects and job
++ * chains for a user-space driver (Mesa panfrost through a panfrost uAPI
++ * emulation in user space). Structure taken from ios-sailfish's Adreno
++ * SweetGPU.cpp (bo bookkeeping, cache maintenance), Mali parts new.
++ *
++ * Selectors:
++ *   10 bo new           in: size[, flags: bit 1 no-exec]
++ *                       out: handle, GPU VA, address (zeroed wired memory,
++ *                       cached in the caller, uncached for the GPU)
++ *   11 bo free          in: handle (waits for the last submit using it)
++ *   12 bo import        in: IOSurface id      out: handle, GPU VA, size
++ *   13 submit           struct in: struct sweet_gpu_submit + u32
++ *                       handles[nr_bos] (every bo the chain touches)
++ *                       out: sequence number
++ *   14 wait             in: sequence number, timeout ms (0: poll)
++ *   15 read register    in: GPU control register offset (< 0x400)  out: value
++ *   16 bo cpu prep      in: handle (after its last submit completed: drops
++ *                       the CPU's cached lines, so the CPU sees GPU writes)
++ * The CPU cache is cleaned over the written pages of every bo a submit
++ * lists. One GPU address space for every client: a client can read and
++ * write other clients' GPU memory. Acceptable on this single-user bring-up
++ * device only.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include "SweetSurface.h"
++#include <sys/errno.h>
++#include "../../../bsd/dev/s9_mali.h"
++
++extern "C" void proc_selfname(char *buf, int size);
++
++#define SWEET_GPU_MAX_BOS       16384u
++#define SWEET_GPU_MAX_BO_BYTES  (256ull << 20)
++#define SWEET_GPU_CLIENT_BYTES  (768ull << 20)     /* own buffers per client */
++
++extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
++extern "C" boolean_t pmap_is_modified(ppnum_t pn);
++extern "C" void pmap_clear_modify(ppnum_t pn);
++extern "C" boolean_t pmap_valid_page(ppnum_t pn);
++
++/*
++ * Push out the CPU's writes to page pa if any landed since the last call:
++ * the pmap's modified bit is set by the first user write after
++ * pmap_clear_modify (write-protect + fast fault). Cleared before the flush,
++ * so a write racing with it is caught next time. Kernel (physmap) writes do
++ * not set it: bos are flushed whole when created or imported.
++ * ponytail: also tells the VM the page is clean; fine while bos are wired.
++ */
++static void
++flush_if_written(uint64_t pa)
++{
++	ppnum_t pn = (ppnum_t)(pa >> PAGE_SHIFT);
++	if (!pmap_valid_page(pn)) {             /* not managed: no modified bit, always */
++		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++	} else if (pmap_is_modified(pn)) {
++		pmap_clear_modify(pn);
++		flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++	}
++}
++
++struct sweet_gpu_submit {
++	uint64_t jc;                    /* GPU VA of the first job descriptor */
++	uint32_t requirements;          /* S9_MALI_REQ_FS: fragment chain */
++	uint32_t nr_bos;
++};
++
++class SweetGPU : public IOService {
++	OSDeclareDefaultStructors(SweetGPU);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetGPU, IOService);
++
++bool
++SweetGPU::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "SweetGPUUserClient");
++	registerService();
++	IOLog("SWEET GPU: SweetGPU registered (Mali %s)\n", s9_mali_ready() ? "ready" : "not ready yet");
++	return true;
++}
++
++struct sweet_gpu_bo {
++	uint64_t iova, size;
++	IOMemoryDescriptor *md;         /* own buffer or a surface's memory; wired */
++	IOMemoryMap *umap;              /* own buffers: the client's mapping */
++	SweetSurface *surface;          /* imports */
++	uint64_t *pa;                   /* pages, for cache maintenance */
++	uint32_t npages;
++	uint32_t last_seq;              /* last submit listing it */
++	bool used;                      /* listed in a submit at least once */
++};
++
++class SweetGPUUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(SweetGPUUserClient);
++
++	task_t fTask;
++	IOLock *fLock;
++	struct sweet_gpu_bo *fBos;
++	uint32_t fBoCap;
++	uint64_t fBoBytes;
++
++	struct sweet_gpu_bo *newBo(uint32_t *handle);
++	struct sweet_gpu_bo *bo(uint64_t handle);
++	void freeBo(struct sweet_gpu_bo *b);
++	IOReturn boNew(uint64_t size, uint32_t flags, uint64_t *out);
++	IOReturn boImport(uint32_t id, uint64_t *out);
++	IOReturn submit(const void *in, size_t len, uint64_t *seq);
++
++public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetGPUUserClient, IOUserClient);
++
++bool
++SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fTask = owningTask;
++	fLock = IOLockAlloc();
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET GPU: user client opened by %s\n", name);
++	return fLock != NULL;
++}
++
++void
++SweetGPUUserClient::free()
++{
++	if (fLock != NULL) {
++		for (uint32_t i = 0; i < fBoCap; i++) {
++			freeBo(&fBos[i]);
++		}
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	if (fBos != NULL) {
++		IOFreeData(fBos, fBoCap * sizeof(fBos[0]));
++		fBos = NULL;
++	}
++	IOUserClient::free();
++}
++
++IOReturn
++SweetGPUUserClient::clientClose(void)
++{
++	IOLockLock(fLock);
++	for (uint32_t i = 0; i < fBoCap; i++) {
++		freeBo(&fBos[i]);
++	}
++	IOLockUnlock(fLock);
++	terminate();
++	return kIOReturnSuccess;
++}
++
++/* Lock held: a free slot (the table grows by doubling), or NULL. */
++struct sweet_gpu_bo *
++SweetGPUUserClient::newBo(uint32_t *handle)
++{
++	for (uint32_t i = 0; i < fBoCap; i++) {
++		if (fBos[i].md == NULL) {
++			*handle = i + 1;
++			return &fBos[i];
++		}
++	}
++	uint32_t cap = fBoCap ? fBoCap * 2 : 256;
++	if (cap > SWEET_GPU_MAX_BOS) {
++		return NULL;
++	}
++	struct sweet_gpu_bo *n = (struct sweet_gpu_bo *)IOMallocZeroData(cap * sizeof(n[0]));
++	if (n == NULL) {
++		return NULL;
++	}
++	if (fBos != NULL) {
++		memcpy(n, fBos, fBoCap * sizeof(n[0]));
++		IOFreeData(fBos, fBoCap * sizeof(fBos[0]));
++	}
++	fBos = n;
++	*handle = fBoCap + 1;
++	fBoCap = cap;
++	return &fBos[*handle - 1];
++}
++
++/* Lock held: the bo for a handle, or NULL. */
++struct sweet_gpu_bo *
++SweetGPUUserClient::bo(uint64_t handle)
++{
++	return handle >= 1 && handle <= fBoCap && fBos[handle - 1].md != NULL ? &fBos[handle - 1] : NULL;
++}
++
++/*
++ * Lock held (or the client is being freed). The GPU may still use the
++ * memory: wait for the last submit that listed the bo first (a hung GPU
++ * fails the wait at once; its memory is then left mapped and wired rather
++ * than freed under a GPU that might wake up).
++ */
++void
++SweetGPUUserClient::freeBo(struct sweet_gpu_bo *b)
++{
++	if (b->md == NULL) {
++		return;
++	}
++	if (b->used && s9_mali_wait(b->last_seq, 2000) != 0) {
++		printf("SWEET GPU: bo %llx busy at free, leaked\n", b->iova);
++		bzero(b, sizeof(*b));
++		return;
++	}
++	s9_mali_vm_unmap(b->iova);
++	OSSafeReleaseNULL(b->umap);
++	IOFreeData(b->pa, b->npages * sizeof(uint64_t));
++	if (b->surface != NULL) {
++		b->md->complete();
++		b->surface->release();
++	} else {
++		fBoBytes -= b->size;
++	}
++	b->md->release();
++	bzero(b, sizeof(*b));
++}
++
++/* out: handle, GPU VA, user address. */
++IOReturn
++SweetGPUUserClient::boNew(uint64_t size, uint32_t flags, uint64_t *out)
++{
++	size = round_page_64(size);
++	if (size == 0 || size > SWEET_GPU_MAX_BO_BYTES || fBoBytes + size > SWEET_GPU_CLIENT_BYTES) {
++		return kIOReturnNoMemory;
++	}
++	uint32_t handle;
++	struct sweet_gpu_bo *b = newBo(&handle);
++	if (b == NULL) {
++		return kIOReturnNoResources;
++	}
++	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared, size, page_size);
++	if (md == NULL) {
++		return kIOReturnNoMemory;
++	}
++	uint32_t npages = (uint32_t)(size / PAGE_SIZE);
++	uint64_t *pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
++	bool ok = pa != NULL;
++	for (uint32_t p = 0; ok && p < npages; p++) {
++		IOByteCount seg = 0;
++		pa[p] = md->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &seg, kIOMemoryMapperNone);
++		ok = pa[p] != 0 && (pa[p] & PAGE_MASK) == 0 && seg >= PAGE_SIZE;
++		if (ok) {
++			/* zeroed through the cached kernel alias: push it out, drop the lines */
++			flush_dcache64((addr64_t)pa[p], PAGE_SIZE, TRUE);
++		}
++	}
++	uint64_t gva = ok ? s9_mali_vm_map(pa, npages, flags & S9_MALI_MAP_NOEXEC) : 0;
++	/*
++	 * Cached in the caller like everywhere else: a write-combined user
++	 * mapping of managed pages makes the pmap rewrite their physmap PTEs
++	 * (froze boot 0150a). Cache maintenance at submit and cpu prep instead.
++	 */
++	IOMemoryMap *umap = gva ? md->createMappingInTask(fTask, 0, kIOMapAnywhere) : NULL;
++	if (umap == NULL) {
++		if (gva) {
++			s9_mali_vm_unmap(gva);
++		}
++		if (pa != NULL) {
++			IOFreeData(pa, npages * sizeof(uint64_t));
++		}
++		md->release();
++		return kIOReturnNoMemory;
++	}
++	*b = (struct sweet_gpu_bo){ .iova = gva, .size = size, .md = md, .umap = umap, .pa = pa, .npages = npages };
++	fBoBytes += size;
++	out[0] = handle;
++	out[1] = gva;
++	out[2] = umap->getAddress();
++	return kIOReturnSuccess;
++}
++
++/* out: handle, GPU VA, size. */
++IOReturn
++SweetGPUUserClient::boImport(uint32_t id, uint64_t *out)
++{
++	SweetSurface *s = sweet_surface_copy(id);
++	if (s == NULL || s->memory == NULL) {
++		OSSafeReleaseNULL(s);
++		return kIOReturnNotFound;
++	}
++	IOMemoryDescriptor *md = s->memory;
++	uint64_t size = md->getLength();
++	uint32_t handle;
++	struct sweet_gpu_bo *b = (size && !(size & PAGE_MASK) && size <= SWEET_GPU_MAX_BO_BYTES) ? newBo(&handle) : NULL;
++	if (b == NULL || md->prepare() != kIOReturnSuccess) {
++		s->release();
++		return b == NULL ? kIOReturnNoResources : kIOReturnVMError;
++	}
++	uint32_t npages = (uint32_t)(size / PAGE_SIZE);
++	uint64_t *pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
++	bool ok = pa != NULL;
++	for (uint32_t p = 0; ok && p < npages; p++) {
++		IOByteCount seg = 0;
++		pa[p] = md->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &seg, kIOMemoryMapperNone);
++		ok = pa[p] != 0 && (pa[p] & PAGE_MASK) == 0 && seg >= PAGE_SIZE;
++		if (ok) {
++			/* lines left by the zero-fill or earlier CPU use; submits flush only written pages */
++			if (pmap_valid_page((ppnum_t)(pa[p] >> PAGE_SHIFT))) {
++				pmap_clear_modify((ppnum_t)(pa[p] >> PAGE_SHIFT));
++			}
++			flush_dcache64((addr64_t)pa[p], PAGE_SIZE, TRUE);
++		}
++	}
++	uint64_t gva = ok ? s9_mali_vm_map(pa, npages, S9_MALI_MAP_NOEXEC) : 0;
++	if (gva == 0) {
++		if (pa != NULL) {
++			IOFreeData(pa, npages * sizeof(uint64_t));
++		}
++		md->complete();
++		s->release();
++		return kIOReturnNoMemory;
++	}
++	md->retain();
++	*b = (struct sweet_gpu_bo){ .iova = gva, .size = size, .md = md, .surface = s, .pa = pa, .npages = npages };
++	out[0] = handle;
++	out[1] = gva;
++	out[2] = size;
++	return kIOReturnSuccess;
++}
++
++/* Lock held. in: struct sweet_gpu_submit, handles. */
++IOReturn
++SweetGPUUserClient::submit(const void *in, size_t len, uint64_t *seqOut)
++{
++	struct sweet_gpu_submit h;
++	if (len < sizeof(h)) {
++		return kIOReturnBadArgument;
++	}
++	memcpy(&h, in, sizeof(h));
++	if (h.jc == 0 || h.nr_bos > SWEET_GPU_MAX_BOS || len != sizeof(h) + h.nr_bos * sizeof(uint32_t)) {
++		return kIOReturnBadArgument;
++	}
++	const uint32_t *handles = (const uint32_t *)((const char *)in + sizeof(h));
++	for (uint32_t i = 0; i < h.nr_bos; i++) {
++		struct sweet_gpu_bo *b = bo(handles[i]);
++		if (b == NULL) {
++			return kIOReturnBadArgument;
++		}
++		/* CPU-cached: push its CPU writes to memory (pages written since the last submit) */
++		for (uint32_t p = 0; p < b->npages; p++) {
++			flush_if_written(b->pa[p]);
++		}
++	}
++	uint32_t seq = 0;
++	int e = s9_mali_submit(h.jc, h.requirements, &seq);
++	if (e != 0) {
++		return kIOReturnNotReady;
++	}
++	for (uint32_t i = 0; i < h.nr_bos; i++) {
++		struct sweet_gpu_bo *b = bo(handles[i]);
++		b->last_seq = seq;
++		b->used = true;
++	}
++	*seqOut = seq;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	if (selector == 14) {           /* wait: without the client lock (other threads submit) */
++		if (args->scalarInputCount != 2) {
++			return kIOReturnBadArgument;
++		}
++		int e = s9_mali_wait((uint32_t)args->scalarInput[0], (uint32_t)(args->scalarInput[1] < 60000 ? args->scalarInput[1] : 60000));
++		return e == 0 ? kIOReturnSuccess : e == ETIMEDOUT ? kIOReturnTimeout : kIOReturnNotReady;
++	}
++	if (!s9_mali_ready()) {
++		return kIOReturnNotReady;
++	}
++	IOReturn ret = kIOReturnBadArgument;
++	IOLockLock(fLock);
++	switch (selector) {
++	case 10:                /* bo new */
++		if (args->scalarInputCount >= 1 && args->scalarOutputCount >= 3) {
++			ret = boNew(args->scalarInput[0],
++			    args->scalarInputCount >= 2 ? (uint32_t)args->scalarInput[1] : 0, args->scalarOutput);
++			args->scalarOutputCount = ret == kIOReturnSuccess ? 3 : 0;
++		}
++		break;
++	case 11:                /* bo free */
++		if (args->scalarInputCount == 1) {
++			struct sweet_gpu_bo *b = bo(args->scalarInput[0]);
++			ret = b != NULL ? kIOReturnSuccess : kIOReturnNotFound;
++			if (b != NULL) {
++				freeBo(b);
++			}
++		}
++		break;
++	case 12:                /* bo import */
++		if (args->scalarInputCount == 1 && args->scalarOutputCount >= 3) {
++			ret = boImport((uint32_t)args->scalarInput[0], args->scalarOutput);
++			args->scalarOutputCount = ret == kIOReturnSuccess ? 3 : 0;
++		}
++		break;
++	case 13:                /* submit */
++		if (args->scalarOutputCount >= 1) {
++			uint64_t seq = 0;
++			if (args->structureInputDescriptor != NULL) {
++				IOMemoryDescriptor *d = args->structureInputDescriptor;
++				size_t len = d->getLength();
++				void *buf = len <= (1u << 20) ? IOMallocData(len) : NULL;
++				if (buf == NULL) {
++					ret = kIOReturnNoMemory;
++					break;
++				}
++				ret = d->prepare() == kIOReturnSuccess ? kIOReturnSuccess : kIOReturnVMError;
++				if (ret == kIOReturnSuccess) {
++					ret = d->readBytes(0, buf, len) == len ? submit(buf, len, &seq) : kIOReturnVMError;
++					d->complete();
++				}
++				IOFreeData(buf, len);
++			} else if (args->structureInput != NULL) {
++				ret = submit(args->structureInput, args->structureInputSize, &seq);
++			}
++			args->scalarOutput[0] = seq;
++			args->scalarOutputCount = 1;
++		}
++		break;
++	case 15:                /* read GPU control register */
++		if (args->scalarInputCount == 1 && args->scalarOutputCount >= 1) {
++			uint32_t v = 0;
++			ret = s9_mali_read_reg((uint32_t)args->scalarInput[0], &v) == 0 ? kIOReturnSuccess : kIOReturnBadArgument;
++			args->scalarOutput[0] = v;
++			args->scalarOutputCount = 1;
++		}
++		break;
++	case 16:                /* bo cpu prep */
++		if (args->scalarInputCount == 1) {
++			struct sweet_gpu_bo *b = bo(args->scalarInput[0]);
++			ret = b == NULL ? kIOReturnNotFound :
++			    b->used && s9_mali_wait(b->last_seq, 0) != 0 ? kIOReturnBusy : kIOReturnSuccess;
++			for (uint32_t p = 0; ret == kIOReturnSuccess && p < b->npages; p++) {
++				flush_dcache64((addr64_t)b->pa[p], PAGE_SIZE, TRUE);
++			}
++		}
++		break;
++
++	default:
++		ret = kIOReturnUnsupported;
++		break;
++	}
++	IOLockUnlock(fLock);
++	return ret;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 92f3e26..f652e39 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetGPU;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetGPU;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index acc9ae0..0ebb1d9 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -16,6 +16,7 @@ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitc
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetGPU.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp

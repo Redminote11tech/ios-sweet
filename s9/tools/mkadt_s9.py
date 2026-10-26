@@ -173,6 +173,14 @@ def build(seed=None):
         ('compatible', cstr('samsung,starlte-input')),
     ])
 
+    # Mali-G72 MP18 (patch 0094, bsd/dev/s9_mali.c): GPU registers. G3D power
+    # domain, clocks and TZPC are handled in the driver (S-Boot leaves G3D on).
+    s9_gpu = node('s9-gpu', [
+        ph(),
+        ('compatible', cstr('arm,mali-bifrost')),
+        ('reg', u64(0x17500000, 0x5000)),
+    ])
+
     return node('device-tree', [
         ph(),
         ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
@@ -183,7 +191,7 @@ def build(seed=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, ufs, s9_input, buttons, pram] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, ufs, s9_input, s9_gpu, buttons, pram] + product)
 
 
 if __name__ == '__main__':
