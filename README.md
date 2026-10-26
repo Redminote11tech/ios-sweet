@@ -1,6 +1,6 @@
 # iOS 16 on Galaxy S9
 
-Oct 22, 2026 · @alphanCZE
+Oct 26, 2026 · @alphanCZE
 
 ## Summary
 
