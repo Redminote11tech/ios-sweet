@@ -12,6 +12,10 @@ on:
       - "s9/sweetgl/**"
       - ".github/workflows/sweetgl.yml"
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "runner label (macos-15-intel when the arm64 pool is full)"
+        default: "macos-14"
 
 concurrency:
   group: sweetgl
@@ -22,7 +26,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner || 'macos-14' }}
     steps:
       - uses: actions/checkout@v4
 
