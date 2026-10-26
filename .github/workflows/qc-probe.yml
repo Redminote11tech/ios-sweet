@@ -7,7 +7,10 @@ on:
     inputs:
       disass:
         description: "symbols to disassemble (regex on the mangled name, comma separated)"
-        default: "create_shader"
+        default: ""
+      delta:
+        description: "offset from the ios-sailfish addresses to check"
+        default: "0x4000"
 
 permissions:
   contents: read
@@ -61,4 +64,6 @@ jobs:
       - name: probe
         env:
           DISASS: ${{ inputs.disass }}
-        run: python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
+        run: |
+          python3 -I s9/tools/qc-verify.py "$CACHE" "${{ inputs.delta || '0x4000' }}"
+          [ -z "$DISASS" ] || python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
