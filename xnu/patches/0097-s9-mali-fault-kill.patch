@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/s9_mali.c b/bsd/dev/s9_mali.c
+index 39d7f73..5a6fa4b 100644
+--- a/bsd/dev/s9_mali.c
++++ b/bsd/dev/s9_mali.c
+@@ -375,6 +375,38 @@ poll_locked(void)
+ 	int s = m.busy_slot;
+ 	uint32_t raw = rd(JOB_IRQ_RAWSTAT);
+ 	uint32_t bits = (1u << s) | (1u << (16 + s));
++	if (!(raw & bits) && (rd(MMU_IRQ_RAWSTAT) & 1)) {
++		/*
++		 * AS0 page fault: the job stalls on it. As Linux panfrost does for
++		 * a fault it cannot handle, switch the AS off (ADRMODE_UNMAPPED) so
++		 * the job fails at once, then put the tables back for the next.
++		 */
++		log_fault("GPU page fault, job killed", s);
++		wr64(AS0 + AS_TRANSTAB, 0);
++		wr64(AS0 + AS_TRANSCFG, 1);     /* ADRMODE_UNMAPPED */
++		wr(AS0 + AS_COMMAND, AS_CMD_UPDATE);
++		wait_bits(AS0 + AS_STATUS, 1, 0, 10000);
++		wr(MMU_IRQ_CLEAR, 0xffffffff);
++		uint64_t t0 = now_us();
++		while (!(rd(JOB_IRQ_RAWSTAT) & bits) && now_us() - t0 < 100000) {
++		}
++		if (!(rd(JOB_IRQ_RAWSTAT) & bits)) {
++			wr(JS(s) + JS_COMMAND, JS_CMD_HARD_STOP);
++			t0 = now_us();
++			while (!(rd(JOB_IRQ_RAWSTAT) & bits) && now_us() - t0 < 100000) {
++			}
++		}
++		wr(JOB_IRQ_CLEAR, bits);
++		wr64(AS0 + AS_TRANSTAB, m.l0_pa);
++		wr64(AS0 + AS_MEMATTR, 0x4c4c4c4c4c4c4c4cULL);
++		wr64(AS0 + AS_TRANSCFG, AS_TRANSCFG_VALUE);
++		wr(AS0 + AS_COMMAND, AS_CMD_UPDATE);
++		wait_bits(AS0 + AS_STATUS, 1, 0, 10000);
++		wr(MMU_IRQ_CLEAR, 0xffffffff);
++		m.done = m.issued;
++		m.busy_slot = -1;
++		return;
++	}
+ 	if (!(raw & bits)) {
+ 		return;
+ 	}
