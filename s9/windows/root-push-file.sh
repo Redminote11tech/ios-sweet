@@ -24,7 +24,7 @@ max=$(cat "$FILES/size-$NAME.txt")
 "$ADB" shell 'umount /data 2>/dev/null; true'
 padded=$(mktemp)
 cp "$FILES/$NAME" "$padded"
-truncate -s "$max" "$padded"
+truncate -s $(( (max + 4095) / 4096 * 4096 )) "$padded"     # whole 4 KiB blocks, as on disk
 # extents file: "file_block disk_start disk_end" (4 KiB blocks) per extent
 CHUNK=$HERE/root-chunk.bin
 while read -r off pstart pend; do
