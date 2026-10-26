@@ -294,9 +294,16 @@ void sweetgl_layerdump_start(void);
 void sweetgl_vibrant_fill_install(void);
 void sweetgl_posterboard_install(void);
 
+extern int sgl_oslog_on;
+
 __attribute__((constructor)) static void
 sweetgl_load(void)
 {
+	const char *ol = getenv("SWEETGL_OSLOG");
+	sgl_oslog_on = ol && ol[0] == '1';
+	if (strcmp(getprogname(), "backboardd") != 0) {
+		sweet_drm_log("sweetgl: loaded into %s%s", getprogname(), sgl_oslog_on ? " (os_log copied)" : "");
+	}
 	if (strcmp(getprogname(), "PosterBoard") == 0) {
 		sweetgl_posterboard_install();
 		return;

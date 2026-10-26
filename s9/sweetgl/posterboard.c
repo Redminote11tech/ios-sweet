@@ -98,6 +98,7 @@ sweetgl_posterboard_install(void)
 {
 	pb_try_install();
 	if (!pb_installed) {
+		sweet_drm_log("sweetgl: PosterBoard: preview builder class not loaded yet, waiting");
 		_dyld_register_func_for_add_image(pb_image_added);
 	}
 }
