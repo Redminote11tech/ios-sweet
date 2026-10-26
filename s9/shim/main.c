@@ -2039,6 +2039,8 @@ static void gpu_first_job(void)
     kvh("  JOB_IRQ_RAW ", raw, "  us ", (now() - t0) * 1000000 / TB_HZ);
     kvh("  JS1 status ", srd(JS1 + 0x24, 0), "  hdr status ", rd32(GPU_JOB + 0x00));
     kvh("  AS0 fault ", srd(AS0 + 0x1c, 0), "  addr ", srd(AS0 + 0x20, 0));
+    kvh("  GPU_IRQ_RAW ", srd(MALI + 0x20, 0), "  GPU_FAULT ", srd(MALI + 0x3c, 0));
+    kvh("  MMU_IRQ_RAW ", srd(MALI + 0x2000, 0), "  JS1 head ", srd(JS1 + 0x00, 0));
     u32 got = rd32(GPU_DST);
     kvh("  memory ", got, "  want ", 0xc0ffee42);
     color(got == 0xc0ffee42 ? OK : BAD);
