@@ -292,10 +292,15 @@ selftest_thread(void *arg)
 
 void sweetgl_layerdump_start(void);
 void sweetgl_vibrant_fill_install(void);
+void sweetgl_posterboard_install(void);
 
 __attribute__((constructor)) static void
 sweetgl_load(void)
 {
+	if (strcmp(getprogname(), "PosterBoard") == 0) {
+		sweetgl_posterboard_install();
+		return;
+	}
 	if (strcmp(getprogname(), "SpringBoard") == 0) {
 		sweetgl_vibrant_fill_install();
 		const char *d = getenv("SWEETGL_LAYERDUMP");
