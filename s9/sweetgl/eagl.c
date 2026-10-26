@@ -119,6 +119,10 @@ sgl_debug_cb(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei len
 	} seen[64];
 	static unsigned total;
 	(void)source; (void)length; (void)user;
+	if (type != GL_DEBUG_TYPE_ERROR && type != GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR &&
+	    type != GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR) {
+		return;         /* shader statistics, performance notes */
+	}
 	unsigned h = 5381;
 	for (const char *p = msg; *p; p++) {
 		h = h * 33 + (unsigned char)*p;
@@ -698,7 +702,17 @@ trace_empty_samplers(GLint prog)
 	}
 }
 
-extern void _mesa_TextureBarrierNV(void);
+/*
+ * Texture barrier: Mesa panfrost has none (glTextureBarrier raises
+ * GL_INVALID_OPERATION, the read sees the target as it was before the
+ * pass). Ending the batch gives the same guarantee here: the kernel runs
+ * job chains in submission order and the next pass preloads the target.
+ */
+static void
+sgl_barrier(void)
+{
+	glFlush();
+}
 
 /*
  * CA reads the destination by sampling the texture it is rendering into
@@ -747,7 +761,7 @@ feedback_barrier(GLint prog)
 	for (int u = 0; u < 15; u++) {
 		if ((prog_units[prog] & 1u << u) && unit_held[u] == (GLuint)att) {
 			WTRACE("feedback: prog %d samples fb %d's texture %d on unit %d: barrier", prog, fb, att, u);
-			_mesa_TextureBarrierNV();
+			sgl_barrier();
 			return;
 		}
 	}
@@ -1034,7 +1048,7 @@ fbfetch_bind(GLint prog)
 	if (fbfetch_scale[prog] > 0) {
 		glUniform2f(fbfetch_scale[prog] - 1, w > 0 ? 1.0f / (GLfloat)w : 1.0f, h > 0 ? 1.0f / (GLfloat)h : 1.0f);
 	}
-	_mesa_TextureBarrierNV();
+	sgl_barrier();
 	/* SWEETGL_TRACE: the first draws of each fbfetch program, wherever they happen */
 	static uint8_t traced[PROG_MAX];
 	if (trace_left > 0 && win_left == 0 && traced[prog] < 12) {
