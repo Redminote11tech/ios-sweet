@@ -22,13 +22,15 @@ jobs:
           V: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          curl -fsSL -o mesa.tar.xz "https://archive.mesa3d.org/mesa-$V.tar.xz"
-          mkdir src && tar -xJf mesa.tar.xz -C src --strip-components=1
-          cd src
-          git init -q -b mesa-src
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add -A
-          git commit -q -m "Mesa $V source (archive.mesa3d.org)"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mesa-src:mesa-src
+          set -o pipefail
+          ( set -ex
+            curl -fsSL -o mesa.tar.xz "https://archive.mesa3d.org/mesa-$V.tar.xz"
+            mkdir src && tar -xJf mesa.tar.xz -C src --strip-components=1
+            cd src
+            git init -q -b mesa-src
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add -A
+            git commit -q -m "Mesa $V source (archive.mesa3d.org)"
+            git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mesa-src:mesa-src
+          ) 2>&1 | tee log.txt || { tail -n 25 log.txt | sed 's/^/::error::/'; exit 1; }
