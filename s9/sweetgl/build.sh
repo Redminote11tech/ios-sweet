@@ -9,9 +9,9 @@
 set -e
 H=$(cd "$(dirname "$0")" && pwd)
 M=$(cd "$1" && pwd)
-B=$2
-O=$3
-mkdir -p "$O"
+mkdir -p "$2" "$3"
+B=$(cd "$2" && pwd)
+O=$(cd "$3" && pwd)
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 CLANG=$(xcrun --sdk iphoneos -f clang)
 CLANGXX=$(xcrun --sdk iphoneos -f clang++)
