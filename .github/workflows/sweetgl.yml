@@ -53,8 +53,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build
-          key: mesa-ios-${{ hashFiles('s9/sweetgl/mesa.patch', 's9/sweetgl/build.sh', 's9/sweetgl/include/**') }}
-          restore-keys: mesa-ios-
+          key: mesa-ios-${{ runner.arch }}-${{ hashFiles('s9/sweetgl/mesa.patch', 's9/sweetgl/build.sh', 's9/sweetgl/include/**') }}
+          restore-keys: mesa-ios-${{ runner.arch }}-
 
       - name: Build
         run: |
