@@ -27,6 +27,7 @@
 #include "util/driconf.h"
 #include "util/xmlconfig.h"
 #include "panfrost/drm/panfrost_drm_public.h"
+#include "renderonly/renderonly.h"
 #include <GLES3/gl3.h>
 
 #include "sweet_drm.h"
@@ -36,6 +37,24 @@ static const driOptionDescription sweetgl_driconf[] = {
 #include "pipe-loader/driinfo_gallium.h"
 #include "panfrost/driinfo_panfrost.h"
 };
+
+/* panfrost calls these only with a renderonly device (KMS scanout); we pass none */
+void
+renderonly_scanout_destroy(struct renderonly_scanout *scanout, struct renderonly *ro)
+{
+	(void)scanout;
+	(void)ro;
+}
+
+struct renderonly_scanout *
+renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc, struct renderonly *ro,
+    struct winsys_handle *out_handle)
+{
+	(void)rsc;
+	(void)ro;
+	(void)out_handle;
+	return NULL;
+}
 
 struct sweetgl_ctx {
 	struct st_context *st;
