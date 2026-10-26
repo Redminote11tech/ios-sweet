@@ -26,12 +26,15 @@ FILES=$HERE/rootfiles
 CH=$((1 << 20))
 RESUME=0
 [ "${1:-}" = "--writeback" ] && RESUME=1    # only redo step 3 from the last run's image
+[ "${1:-}" = "--extents" ] && RESUME=2      # only step 4, from the last run's image
 mkdir -p "$WORK" "$MNT"
 [ -s "$FILES/install.txt" ] || { echo "no rootfiles/install.txt"; exit 1; }
 command -v fsck.hfsplus >/dev/null || apt-get install -y -q hfsprogs >/dev/null
 grep -qw hfsplus /proc/filesystems || modprobe hfsplus || { echo "RESULT: NO_HFSPLUS (run use-hfs-kernel.bat)"; exit 3; }
 
-if [ $RESUME = 0 ]; then
+if [ $RESUME = 2 ]; then
+	:
+elif [ $RESUME = 0 ]; then
 free=$(df --output=avail -B1 "$WORK" | tail -1)
 [ -f "$IMG" ] && free=$((free + $(stat -c %s "$IMG")))
 if [ "$free" -lt $((SIZE + (1 << 30))) ]; then
@@ -39,6 +42,7 @@ if [ "$free" -lt $((SIZE + (1 << 30))) ]; then
 	exit 1
 fi
 fi
+if [ $RESUME != 2 ]; then
 "$ADB" devices
 "$ADB" push "$(wslpath -w "$HERE/s9io")" /tmp/s9io >/dev/null
 "$ADB" shell chmod 755 /tmp/s9io
@@ -120,6 +124,7 @@ while read -r start count; do
 done < "$WORK/runs.txt"
 rm -f "$CHUNK"
 "$ADB" shell sync
+fi
 # disk extents of the installed files, for root-push-file.sh
 mount -t hfsplus -o loop,ro "$IMG" "$MNT"
 sed 's/\r$//' "$FILES/install.txt" | while read -r src dest mode; do

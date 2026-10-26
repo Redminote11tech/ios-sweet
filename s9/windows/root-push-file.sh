@@ -12,7 +12,10 @@ DEV=/dev/block/by-name/USERDATA
 FILES=$HERE/rootfiles
 NAME=$1
 EXT=$FILES/extents-$NAME.txt
+# extents not recorded yet: work them out from the last root-update image
+[ -s "$EXT" ] || bash "$HERE/root-update.sh" --extents
 [ -s "$EXT" ] || { echo "RESULT: NO_EXTENTS for $NAME (run root-update.bat once)"; exit 1; }
+echo "$NAME: $(wc -l < "$EXT") extents"
 size=$(stat -c %s "$FILES/$NAME")
 max=$(cat "$FILES/size-$NAME.txt")
 [ "$size" -le "$max" ] || { echo "RESULT: TOO_BIG ($size > $max bytes installed)"; exit 1; }
