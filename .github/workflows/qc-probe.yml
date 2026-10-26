@@ -79,7 +79,7 @@ jobs:
         run: |
           python3 -I s9/tools/qc-verify.py "$CACHE" "${{ inputs.delta || '0x4000' }}"
           [ -z "${{ inputs.sym }}" ] || python3 -I s9/tools/qc-sym.py "$CACHE" "${{ inputs.sym }}"
-          if [ -n "${{ inputs.cdis }}" ]; then pip install -q capstone; python3 s9/tools/qc-cdis.py "$CACHE" "${{ inputs.cdis }}" > "$RUNNER_TEMP/cd.log" 2>&1 || echo "::error::qc-cdis: $(tail -c 3000 "$RUNNER_TEMP/cd.log" | tr '\n' ' ')"; cat "$RUNNER_TEMP/cd.log"; fi
+          if [ -n "${{ inputs.cdis }}" ]; then pip install -q capstone; QC_ALL=1 python3 s9/tools/qc-cdis.py "$CACHE" "${{ inputs.cdis }}" > "$RUNNER_TEMP/cd.log" 2>&1 || echo "::error::qc-cdis: $(tail -c 3000 "$RUNNER_TEMP/cd.log" | tr '\n' ' ')"; cat "$RUNNER_TEMP/cd.log"; fi
           [ -z "$DISASS" ] || python3 -I s9/tools/qc-probe.py "$CACHE" "$DISASS"
       - name: filesystem file
         if: inputs.fsfile != ''
