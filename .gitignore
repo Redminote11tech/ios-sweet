@@ -16,3 +16,4 @@ s9/shim/*.img
 s9/shim/test.dtb
 s9/shim/*.ppm
 s9/shim/font-preview.png
+s9/tools/s9io/s9io.o

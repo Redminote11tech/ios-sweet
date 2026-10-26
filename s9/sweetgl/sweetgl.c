@@ -275,7 +275,11 @@ sweetgl_load(void)
 		}
 		return;
 	}
-	sweetgl_eagl_install();
+	/* S9 bring-up: CoreAnimation goes through Mesa only with SWEETGL_EAGL=1 */
+	const char *e = getenv("SWEETGL_EAGL");
+	if (e && e[0] == '1') {
+		sweetgl_eagl_install();
+	}
 	const char *t = getenv("SWEETGL_TEST");
 	if (t && t[0] == '1') {
 		pthread_t th;
