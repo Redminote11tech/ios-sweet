@@ -1,0 +1,32 @@
+From ad577359335b239ea6c407ce78dd5f0505ec4ff8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 23:10:48 +0100
+Subject: [PATCH] 0104
+
+---
+ bsd/dev/s9_power.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/bsd/dev/s9_power.c b/bsd/dev/s9_power.c
+index 9ed8aac..55d447f 100644
+--- a/bsd/dev/s9_power.c
++++ b/bsd/dev/s9_power.c
+@@ -38,14 +38,13 @@ s9_halt_restart(unsigned int type)
+ 	if (s9_pmu == NULL || (type != PE_HALT_CPU && type != PE_RESTART_CPU)) {
+ 		return -1;
+ 	}
++	/* no printf from here: console output with interrupts off panics */
+ 	(void)ml_set_interrupts_enabled(FALSE);
+ 	if (type == PE_RESTART_CPU) {
+-		printf("S9 POWER: restart\n");
+ 		s9_pmu[S9_PMU_SYSIP_DAT0 / 4] = 0;
+ 		__builtin_arm_dsb(0xf);
+ 		s9_pmu[S9_PMU_SWRESET / 4] = 1;
+ 	} else {
+-		printf("S9 POWER: power off (PS_HOLD low)\n");
+ 		s9_pmu[S9_PMU_PS_HOLD / 4] = s9_pmu[S9_PMU_PS_HOLD / 4] & ~0x100u;
+ 	}
+ 	__builtin_arm_dsb(0xf);
+-- 
+2.43.0
+
