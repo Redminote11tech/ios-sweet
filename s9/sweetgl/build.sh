@@ -79,7 +79,7 @@ for f in sweetgl sweet_drm eagl layerdump posterboard oslog "$O/dispatch"; do
 	$CC -O2 -Wall -fvisibility=hidden @"$O/mesa-defines.rsp" $INC -I"$H" -c "$src" -o "$O/$(basename "$f").o"
 done
 printf '_sweetgl_init\n_sweetgl_create\n_sweetgl_make_current\n_sweetgl_destroy\n_sweetgl_selftest\n' > "$O/exports.txt"
-$CLANGXX -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.0 -dynamiclib -dead_strip -Wl,-x \
+$CLANGXX -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.0 -dynamiclib -dead_strip -Wl,-x -Wl,-not_for_dyld_shared_cache \
 	-install_name /usr/lib/sweetgl.dylib -exported_symbols_list "$O/exports.txt" \
 	-o "$O/sweetgl.dylib" "$O/sweetgl.o" "$O/sweet_drm.o" "$O/eagl.o" "$O/layerdump.o" "$O/posterboard.o" "$O/oslog.o" "$O/dispatch.o" \
 	$(sed "s|^|$B/|" "$O/libs.txt") \
