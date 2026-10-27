@@ -126,6 +126,13 @@ jobs:
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+          # ARMv8.1+ atomics left in the kernel (must be 0 with SWEET_ARMV80)
+          for k in out/kernel.development.*; do
+            case "$k" in *.dSYM*) continue;; esac
+            [ -f "$k" ] || continue
+            n=$(xcrun llvm-objdump -d --mattr=+lse "$k" 2>/dev/null | grep -cE "\s(cas[a-z]*|ld(add|set|clr|eor|[su]max|[su]min)[a-z]*|swp[a-z]*)\s" || true)
+            echo "::notice title=LSE instructions in $(basename "$k")::$n"
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
