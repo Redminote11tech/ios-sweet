@@ -1,12 +1,12 @@
-From c62cc9d5a75044d5219cc6c35311fccf33c2ff31 Mon Sep 17 00:00:00 2001
+From c2d223f1bc6803c8d78ae7866785d0b5bd61da2b Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 27 Oct 2026 14:48:00 +0100
 Subject: [PATCH] 0113
 
 ---
  bsd/dev/sweet_sample.c | 15 ++++++++++
- osfmk/kern/exception.c | 68 ++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 83 insertions(+)
+ osfmk/kern/exception.c | 67 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 82 insertions(+)
 
 diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
 index 386dbb4..bad4f73 100644
@@ -42,10 +42,10 @@ index 386dbb4..bad4f73 100644
  		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
  	}
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
-index a20a764..4171689 100644
+index a20a764..a593784 100644
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1132,3 +1132,71 @@ sys_perf_notify(thread_t thread, int pid)
+@@ -1132,3 +1132,70 @@ sys_perf_notify(thread_t thread, int pid)
  
  	return ret;
  }
@@ -53,7 +53,6 @@ index a20a764..4171689 100644
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <arm/cpu_data_internal.h>
 +#include <kern/processor.h>
-+#include <kern/thread_kernel_state.h>
 +#include <mach/vm_param.h>
 +
 +/*
@@ -79,7 +78,7 @@ index a20a764..4171689 100644
 +		    i, cd->cpu_running, cd->cpu_stat.irq_ex_cnt, cd->cpu_stat.ipi_cnt, cd->cpu_stat.timer_cnt,
 +		    cd->cpu_signal, t ? thread_tid(t) : 0ULL,
 +		    (t && get_threadtask(t)) ? task_pid(get_threadtask(t)) : -1,
-+		    (t && t == cd->cpu_processor->idle_thread) ? " (idle)" : "");
++		    (t && cpu_to_processor(i) && t == cpu_to_processor(i)->idle_thread) ? " (idle)" : "");
 +	}
 +}
 +
