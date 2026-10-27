@@ -1,0 +1,94 @@
+From f8de2975967d5f1864960467136f8fbc13f24f23 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 13:48:23 +0100
+Subject: [PATCH] 0110
+
+---
+ bsd/dev/sweet_sample.c | 10 ++++++++--
+ osfmk/arm64/sleh.c     | 21 ++++++++++++++++++---
+ 2 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index b40eccd..386dbb4 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -10,7 +10,7 @@
+  * with tools/sweet-crash.py). A thread blocked in a syscall shows the
+  * syscall stub in pc and its caller in lr/bt.
+  *
+- * First sample 90 s after start, then every 120 s, 40 samples at most.
++ * First sample 30 s after start, then every 120 s, 40 samples at most.
+  */
+ #include <sys/param.h>
+ #include <sys/systm.h>
+@@ -23,6 +23,9 @@
+ extern task_t proc_task(proc_t);
+ extern int hz;
+ extern void sweet_sample_start(void);
++#if SWEET_ARMV80
++extern void sweet_lse_stats(void);
++#endif
+ 
+ static char sweet_sample_names[128];
+ 
+@@ -70,9 +73,12 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
++	(void)tsleep(&chan, PZERO, "sweetsmp", 30 * hz);
+ 	for (int i = 0; i < 40; i++) {
+ 		printf("SMP --- sample %d\n", i);
++#if SWEET_ARMV80
++		sweet_lse_stats();
++#endif
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+ 		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
+ 	}
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index e01092a..bdc994a 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -900,7 +900,7 @@ extern int _sweet_lse_caspw(user_addr_t, uint64_t, uint64_t, uint64_t, uint64_t,
+ extern int _sweet_lse_caspx(user_addr_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t *);
+ 
+ static int sweet_lse_emul = 1;
+-static uint64_t sweet_lse_count, sweet_lse_moved;
++static uint64_t sweet_lse_count, sweet_lse_kcount, sweet_lse_moved;
+ 
+ static inline uint64_t
+ sweet_xreg(arm_saved_state_t *state, unsigned r)
+@@ -985,13 +985,28 @@ sweet_lse_emulate(arm_saved_state_t *state, uint32_t instr, user_addr_t *addr)
+ 	}
+ 	if (err == 0) {
+ 		add_saved_state_pc(state, 4);
+-		if (sweet_lse_count++ == 0 && !PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+-			printf("sweet: emulating LSE atomics on the M3 cores (first: %08x)\n", instr);
++		if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
++			sweet_lse_kcount++;
++		} else {
++			uint64_t n = ++sweet_lse_count;
++			if (n <= 8 || (n & (n - 1)) == 0) {
++				printf("sweet: LSE emulation #%llu (kernel %llu) cpu %d pid %d pc 0x%llx instr %08x addr 0x%llx\n",
++				    n, sweet_lse_kcount, cpu_number(), proc_selfpid(), (uint64_t)get_saved_state_pc(state) - 4,
++				    instr, (uint64_t)a);
++			}
+ 		}
+ 	}
+ 	return err;
+ }
+ 
++void sweet_lse_stats(void);
++void
++sweet_lse_stats(void)
++{
++	printf("sweet: LSE emulated user %llu kernel %llu, threads moved to little cores %llu\n",
++	    sweet_lse_count, sweet_lse_kcount, sweet_lse_moved);
++}
++
+ /* true if handled: the thread continues (emulated, or moved to a little core to retry) */
+ static bool
+ sweet_big_core_undef(arm_saved_state_t *state, uint32_t instr)
+-- 
+2.43.0
+
