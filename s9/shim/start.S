@@ -324,7 +324,10 @@ big_entry:
         mov     x16, #0x100000
 4:      subs    x16, x16, #1
         b.ne    4b
-        b       3b
+        cmp     x15, #2000                      // about 2 s of counting,
+        b.lo    3b
+7:      wfe                                     // then idle (cooler)
+        b       7b
         .balign 8
 big_mb:
         .quad   0xef300800

@@ -77,8 +77,30 @@ static void glyph(int col, int row, char ch, u32 fg, u32 bg)
     }
 }
 
+// Probe log: everything printed is also kept here ("SHIM " per line) and
+// written to the iOS persistent-log area at the end of USERDATA by
+// shimlog_flush() (SHIMLOG builds), so results survive without a screen.
+#define SHIMLOG_MAX (60 * 1024)
+static char shimlog_buf[SHIMLOG_MAX];
+static unsigned shimlog_len, shimlog_bol = 1;
+
+static void shimlog_put(char c)
+{
+    if (shimlog_bol) {
+        const char *p = "SHIM ";
+        while (*p && shimlog_len < SHIMLOG_MAX - 2)
+            shimlog_buf[shimlog_len++] = *p++;
+        shimlog_bol = 0;
+    }
+    if (shimlog_len < SHIMLOG_MAX - 2)
+        shimlog_buf[shimlog_len++] = c;
+    if (c == '\n')
+        shimlog_bol = 1;
+}
+
 static void putch(char c)
 {
+    shimlog_put(c);
     if (c == '\n' || cur_x >= COLS - 1) {
         cur_x = 0;
         cur_y++;
@@ -2192,6 +2214,137 @@ static void smp_test(void)
 }
 #endif
 
+// ---------------------------------------------------------------- probe log to UFS
+#ifdef SHIMLOG
+// ufs_probe()'s bring-up without the report: take over S-Boot's host,
+// wake the device, find USERDATA in the GPT. 0 on success.
+static int ufs_open_userdata(u64 *ud_first, u64 *ud_last)
+{
+    u32 hcs = ufs_rd(0x30);
+    u64 sb_list = (u64)ufs_rd(0x50) | (u64)ufs_rd(0x54) << 32;
+    u32 sb_resp = 0;
+    if (sb_list && sb_list < 0x100000000UL) {
+        sb_resp = ((const volatile struct utrd *)sb_list)->resp;
+        ufs_ct = ((const volatile struct utrd *)sb_list)->dw0 >> 28;
+    }
+    ufs_bytes = (sb_resp >> 16) >= 512;
+    u32 ent = vs_rd(0x00) & 0x1f;
+    if (ent >= 9 && ent <= 17)
+        ufs_prdt_max = 1u << ent;
+    if (!(hcs & 1) || !(hcs & 2) || ufs_rd(0x58))
+        return 1;
+    ufs_link_up();
+    ufs_wr(0x60, 0);
+    zero((void *)UFS_DMA, 0x30000);
+    u64 list = (u64)utrl;
+    ufs_wr(0x50, (u32)list);
+    ufs_wr(0x54, (u32)(list >> 32));
+    ufs_wr(0x60, 1);
+    if (ufs_rd(0x50) != (u32)list || !(ufs_rd(0x60) & 1))
+        return 2;
+    u32 ocs = 0, st = 0, rc = 1;
+    for (int i = 0; i < 3 && rc; i++)
+        rc = ufs_nop(&ocs);
+    static const u8 ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+    static const u8 tur[6] = { 0 };
+    ufs_lun = 0xd0;
+    rc = 1;
+    for (int i = 0; i < 4 && rc; i++)
+        rc = ufs_scsi(ssu, 6, 0, 0, &ocs, &st);
+    ufs_lun = 0;
+    rc = 1;
+    for (int i = 0; i < 6 && rc; i++)
+        rc = ufs_scsi(tur, 6, 0, 0, &ocs, &st);
+    static const u8 rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
+    if (ufs_scsi(rd10, 10, ufs_data, 2 * UFS_BLOCK, &ocs, &st))
+        return 3;
+    const u8 *g = ufs_data + UFS_BLOCK;
+    if (!(g[0] == 'E' && g[1] == 'F' && g[2] == 'I'))
+        return 4;
+    u32 nent = g[80] | g[81] << 8, esz = g[84] | g[85] << 8, elba = g[72] | g[73] << 8;
+    if (esz != 128 || nent > 128 || ufs_read(elba, (nent * 128 + UFS_BLOCK - 1) / UFS_BLOCK, gpt_ents))
+        return 5;
+    for (u32 i = 0; i < nent; i++) {
+        const u8 *e = gpt_ents + i * 128;
+        if (e[56] == 'U' && e[58] == 'S' && e[60] == 'E' && e[62] == 'R' && rle64(e + 32)) {
+            *ud_first = rle64(e + 32);
+            *ud_last = rle64(e + 40);
+            return *ud_last - *ud_first > 0x100000 ? 0 : 6;
+        }
+    }
+    return 7;
+}
+
+static int ufs_write_lba(u32 lba, u32 n)
+{
+    u32 ocs = 0, st = 0;
+    u8 wr10[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, 0, (u8)n, 0 };
+    ufs_write_dir = 1;
+    u32 rc = ufs_scsi(wr10, 10, ufs_data, n * UFS_BLOCK, &ocs, &st);
+    ufs_write_dir = 0;
+    return rc != 0;
+}
+
+// The log area XNU uses: header block at USERDATA end - 1025 blocks, text
+// (ring offset 0..) after it, so pull-log.bat (last 4 MiB + 4 KiB) gets it.
+static void shimlog_flush(void)
+{
+    static int state = -1;
+    static u64 base;
+    static u64 seq;
+    if (state < 0) {
+        u64 f = 0, l = 0;
+        int e = ufs_open_userdata(&f, &l);
+        state = e == 0;
+        base = l + 1 - 1025;
+        if (e) {
+            color(BAD);
+            kvh("probe log: UFS open failed ", e, "", 0);
+            color(FG);
+        }
+    }
+    if (!state)
+        return;
+    u32 nblk = (shimlog_len + UFS_BLOCK - 1) / UFS_BLOCK;
+    int err = 0;
+    for (u32 b = 0; b < nblk && !err; b += 2) {
+        u32 n = nblk - b < 2 ? nblk - b : 2;
+        zero(ufs_data, 2 * UFS_BLOCK);
+        for (u32 i = 0; i < n * UFS_BLOCK && b * UFS_BLOCK + i < shimlog_len; i++)
+            ufs_data[i] = (u8)shimlog_buf[b * UFS_BLOCK + i];
+        err = ufs_write_lba((u32)(base + 1 + b), n);
+    }
+    zero(ufs_data, UFS_BLOCK);
+    const char *m = "SWEETLOG";
+    for (int i = 0; i < 8; i++)
+        ufs_data[i] = (u8)m[i];
+    u32 ver = 1, size = 4u << 20;
+    u64 tot = shimlog_len;
+    seq++;
+    for (int i = 0; i < 4; i++) {
+        ufs_data[8 + i] = (u8)(ver >> (8 * i));
+        ufs_data[12 + i] = (u8)(size >> (8 * i));
+    }
+    for (int i = 0; i < 8; i++) {
+        ufs_data[16 + i] = (u8)(tot >> (8 * i));
+        ufs_data[24 + i] = (u8)(seq >> (8 * i));
+    }
+    if (!err)
+        err = ufs_write_lba((u32)base, 1);
+    u32 ocs = 0, st = 0;
+    static const u8 sync10[10] = { 0x35 };
+    (void)ufs_scsi(sync10, 10, 0, 0, &ocs, &st);
+    if (err) {
+        state = 0;
+        color(BAD);
+        puts_("probe log: write failed\n");
+        color(FG);
+    }
+}
+#else
+static void shimlog_flush(void) {}
+#endif
+
 // ---------------------------------------------------------------- big-core probe (t9)
 // The Mongoose (big) cluster under PSCI CPU_ON 0x100..0x103, with an entry
 // that reports by PSCI context id (not MPIDR): the t8 probes could not tell
@@ -2261,6 +2414,7 @@ static void all_test(void)
     color(HEAD);
     puts_("8-core probe (t13): M3 PMU defaults, big 4-7 then little 1-3\n");
     color(FG);
+    shimlog_flush();
     static const u32 m3def[6][3] = {
         {0x1088, 0xff000000, 0x8d000000}, {0x2114, 3, 2}, {0x2180, 3, 2},
         {0x21ec, 3, 2}, {0x2258, 3, 2}, {0x2384, 3, 2},
@@ -2276,6 +2430,8 @@ static void all_test(void)
     static const u32 idx[7] = {4, 5, 6, 7, 1, 2, 3};
     for (int i = 0; i < 7; i++) {
         u64 mb = BIG_MB + idx[i] * 32;
+        kvh("starting ", tgt[i], " ...", 0);
+        shimlog_flush();
         u64 rc = psci_call(0xC4000003UL, tgt[i], (u64)big_entry, 0);
         u64 t0 = now();
         while (!rd32(mb) && now() - t0 < TB_HZ)
@@ -2303,6 +2459,8 @@ static void all_test(void)
     kvh("\nCORES RUNNING: ", n, " of ", 8);
     color(FG);
     big_state("cluster 1 now:\n");
+    puts_("t13 done\n");
+    shimlog_flush();
     for (;;)
         __asm__ volatile("wfe");
 }

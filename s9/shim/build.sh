@@ -72,7 +72,7 @@ link t12-Image out/nopayload.o
 
 # t13: all 8 cores, each reporting by its MPIDR (bars rows 1900 + 120*idx)
 clang $CFLAGS -DBIG_BY_MPIDR -c start.S -o out/start.o
-clang $CFLAGS -DBIGTEST -DBIG_BY_MPIDR -c main.c -o out/main.o
+clang $CFLAGS -DBIGTEST -DBIG_BY_MPIDR -DSHIMLOG -c main.c -o out/main.o
 link t13-Image out/nopayload.o
 clang $CFLAGS -c start.S -o out/start.o
 clang $CFLAGS -c main.c -o out/main.o
