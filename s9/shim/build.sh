@@ -57,6 +57,10 @@ link t8-Image out/nopayload.o
 # t9: big (Mongoose) cluster CPU_ON probe
 clang $CFLAGS -DBIGTEST -c main.c -o out/main.o
 link t9-Image out/nopayload.o
+
+# t10: ACPM (APM firmware) plugin table, read-only
+clang $CFLAGS -DACPMTEST -c main.c -o out/main.o
+link t10-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

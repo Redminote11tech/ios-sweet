@@ -2280,6 +2280,78 @@ static void big_test(void)
 }
 #endif
 
+// ---------------------------------------------------------------- ACPM probe (t10)
+// Read-only: the APM (power co-processor) firmware's framework header in
+// APM SRAM (0x02039000 + initdata 0x7f00, Samsung fw_header/framework.h)
+// and its plugin table (id, attached, stay_attached, size, name), plus a
+// liveness check (log/ktime fields twice, 1 s apart) and the AP<->APM
+// mailbox. t9 showed CPU_ON(0x100) never returning with cluster 1 off:
+// is the APM side (cluster power-up) there at all?
+#ifdef ACPMTEST
+#define APM_SRAM 0x02039000UL
+#define APM_INIT (APM_SRAM + 0x7f00)
+#define APM_MBOX 0x14100000UL
+
+static void sram_str(u64 a, int max)
+{
+    char b[48];
+    int i = 0;
+    for (; i < max && i < 47; i++) {
+        u32 w = safe_rd32((a + i) & ~3UL);
+        char c = (char)(w >> (8 * ((a + i) & 3)));
+        if (c == 0)
+            break;
+        b[i] = (c >= 32 && c < 127) ? c : '.';
+    }
+    b[i] = 0;
+    puts_(b);
+}
+
+static void acpm_test(void)
+{
+    color(HEAD);
+    puts_("ACPM probe (t10): APM firmware + plugins (read-only)\n");
+    color(FG);
+    u32 plugins = safe_rd32(APM_INIT + 0), nplug = safe_rd32(APM_INIT + 4);
+    kvh("  plugins ", plugins, "  num ", nplug);
+    kvh("  ipc_ch ", safe_rd32(APM_INIT + 8), "  n ", safe_rd32(APM_INIT + 12));
+    kvh("  pid_fw ", safe_rd32(APM_INIT + 16), "  pid_max ", safe_rd32(APM_INIT + 20));
+    kvh("  total ", safe_rd32(APM_INIT + 72), "  fw_size ", safe_rd32(APM_INIT + 76));
+    puts_("  build ");
+    sram_str(APM_INIT + 88, 25);
+    puts_("  ");
+    sram_str(APM_INIT + 113, 25);
+    puts_("\n");
+    u32 k0 = safe_rd32(APM_INIT + 44), r0 = safe_rd32(APM_INIT + 48);
+    wait_ticks(TB_HZ);
+    kvh("  ktime ", k0, " -> ", safe_rd32(APM_INIT + 44));
+    kvh("  log rear ", r0, " -> ", safe_rd32(APM_INIT + 48));
+    for (u32 i = 0; i < nplug && i < 16 && plugins && plugins < 0x30000; i++) {
+        u64 p = APM_SRAM + plugins + i * 48;
+        u32 id = safe_rd32(p), att = safe_rd32(p + 32) & 0xff, size = safe_rd32(p + 36);
+        u32 stay = safe_rd32(p + 40) & 0xff, fw = safe_rd32(p + 44), ops = safe_rd32(p + 12);
+        kvh("  #", id, " att/stay ", att * 16 + stay);
+        puts_("     size ");
+        hex(size, 6);
+        puts_(" ");
+        if (fw && fw < 0x30000)
+            sram_str(APM_SRAM + fw, 30);
+        if (ops && ops < 0x30000) {
+            puts_(" ");
+            sram_str(APM_SRAM + ops + 16, 24);
+        }
+        puts_("\n");
+    }
+    kvh("  mbox 0x00 ", safe_rd32(APM_MBOX + 0x0), " 0x10 ", safe_rd32(APM_MBOX + 0x10));
+    kvh("  mbox 0x08 ", safe_rd32(APM_MBOX + 0x8), " 0x1c ", safe_rd32(APM_MBOX + 0x1c));
+    kvh("  CL1 noncpu ", safe_rd32(0x14060000UL + 0x2044), "  CL1 PLL ", safe_rd32(0x1d100120UL));
+    color(HEAD);
+    puts_("\nDone.\n");
+    for (;;)
+        __asm__ volatile("wfe");
+}
+#endif
+
 // ---------------------------------------------------------------- exceptions
 void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 {
@@ -2303,6 +2375,9 @@ void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
     rect(0, 0, FB_W, FB_H, BG);
 #ifdef BIGTEST
     big_test();
+#endif
+#ifdef ACPMTEST
+    acpm_test();
 #endif
 #ifdef SMPTEST
     smp_test();
