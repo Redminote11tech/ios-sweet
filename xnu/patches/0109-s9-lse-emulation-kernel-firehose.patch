@@ -1,0 +1,47 @@
+From 098f1316c8121e96d9285d5352d63611c5ae04b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 13:18:24 +0100
+Subject: [PATCH] 0109
+
+---
+ osfmk/arm64/sleh.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 4e96b80..e01092a 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -985,7 +985,7 @@ sweet_lse_emulate(arm_saved_state_t *state, uint32_t instr, user_addr_t *addr)
+ 	}
+ 	if (err == 0) {
+ 		add_saved_state_pc(state, 4);
+-		if (sweet_lse_count++ == 0) {
++		if (sweet_lse_count++ == 0 && !PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+ 			printf("sweet: emulating LSE atomics on the M3 cores (first: %08x)\n", instr);
+ 		}
+ 	}
+@@ -996,10 +996,20 @@ sweet_lse_emulate(arm_saved_state_t *state, uint32_t instr, user_addr_t *addr)
+ static bool
+ sweet_big_core_undef(arm_saved_state_t *state, uint32_t instr)
+ {
+-	if (!sweet_lse_emul || !PSR64_IS_USER64(get_saved_state_cpsr(state)) || !sweet_on_big_core()) {
++	if (!sweet_lse_emul || !sweet_on_big_core()) {
+ 		return false;
+ 	}
+ 	user_addr_t a = 0;
++	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
++		/*
++		 * The KDK's prebuilt libfirehose_kernel (kernel os_log buffers) is
++		 * built with LSE atomics: emulate those too. Anything else panics.
++		 */
++		return sweet_lse_emulate(state, instr, &a) == 0;
++	}
++	if (!PSR64_IS_USER64(get_saved_state_cpsr(state))) {
++		return false;
++	}
+ 	int r = sweet_lse_emulate(state, instr, &a);
+ 	if (r == 0) {
+ 		return true;
+-- 
+2.43.0
+
