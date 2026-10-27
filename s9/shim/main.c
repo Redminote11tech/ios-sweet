@@ -2254,6 +2254,60 @@ static int big_start(u64 target, u32 ctx)
     return ran;
 }
 
+#ifdef BIG_BY_MPIDR
+/* t13: every core reports into the slot of its own MPIDR (0-3 A55, 4-7 M3) */
+static void all_test(void)
+{
+    color(HEAD);
+    puts_("8-core probe (t13): M3 PMU defaults, big 4-7 then little 1-3\n");
+    color(FG);
+    static const u32 m3def[6][3] = {
+        {0x1088, 0xff000000, 0x8d000000}, {0x2114, 3, 2}, {0x2180, 3, 2},
+        {0x21ec, 3, 2}, {0x2258, 3, 2}, {0x2384, 3, 2},
+    };
+    for (int i = 0; i < 6; i++) {
+        u64 a = 0x14060000UL + m3def[i][0];
+        safe_wr32(a, (safe_rd32(a) & ~m3def[i][1]) | m3def[i][2]);
+    }
+    for (int i = 0; i < 0x100; i += 4)
+        wr32(BIG_MB + i, 0);
+    __asm__ volatile("dsb sy" ::: "memory");
+    static const u32 tgt[7] = {0x100, 0x101, 0x102, 0x103, 0x1, 0x2, 0x3};
+    static const u32 idx[7] = {4, 5, 6, 7, 1, 2, 3};
+    for (int i = 0; i < 7; i++) {
+        u64 mb = BIG_MB + idx[i] * 32;
+        u64 rc = psci_call(0xC4000003UL, tgt[i], (u64)big_entry, 0);
+        u64 t0 = now();
+        while (!rd32(mb) && now() - t0 < TB_HZ)
+            ;
+        int ran = rd32(mb) >> 16 == 0xb16c;
+        kvh("CPU_ON ", tgt[i], "  rc ", (u32)rc);
+        color(ran ? OK : BAD);
+        puts_(ran ? "  runs, MPIDR " : "  no sign of life\n");
+        if (ran) {
+            hex(rd32(mb + 4), 8);
+            puts_("  LSE ");
+            hex((rd32(mb + 16) >> 20) & 0xf, 1);
+            puts_("\n");
+        }
+        color(FG);
+    }
+    wait_ticks(TB_HZ);
+    int n = 1;
+    for (int i = 1; i < 8; i++) {
+        u32 c0 = rd32(BIG_MB + i * 32 + 8);
+        n += rd32(BIG_MB + i * 32) >> 16 == 0xb16c;
+        (void)c0;
+    }
+    color(n == 8 ? OK : HEAD);
+    kvh("\nCORES RUNNING: ", n, " of ", 8);
+    color(FG);
+    big_state("cluster 1 now:\n");
+    for (;;)
+        __asm__ volatile("wfe");
+}
+#endif
+
 static void big_test(void)
 {
     color(HEAD);
@@ -2412,6 +2466,9 @@ void shim_exception(u64 vec, u64 esr, u64 elr, u64 far, u64 spsr)
 void shim_main(u64 x0, u64 x1, u64 x2, u64 x3, u64 load)
 {
     rect(0, 0, FB_W, FB_H, BG);
+#ifdef BIG_BY_MPIDR
+    all_test();
+#endif
 #ifdef BIGTEST
     big_test();
 #endif

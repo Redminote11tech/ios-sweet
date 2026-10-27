@@ -69,6 +69,12 @@ link t11-Image out/nopayload.o
 # t12: t9 with the six CPUCL1 PMU defaults (Samsung pmucal_lpm_init) first
 clang $CFLAGS -DBIGTEST -DBIGTEST3 -c main.c -o out/main.o
 link t12-Image out/nopayload.o
+
+# t13: all 8 cores, each reporting by its MPIDR (bars rows 1900 + 120*idx)
+clang $CFLAGS -DBIG_BY_MPIDR -c start.S -o out/start.o
+clang $CFLAGS -DBIGTEST -DBIG_BY_MPIDR -c main.c -o out/main.o
+link t13-Image out/nopayload.o
+clang $CFLAGS -c start.S -o out/start.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

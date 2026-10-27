@@ -265,7 +265,19 @@ smp_entry_end:
         .balign 8
         .globl big_entry, big_entry_end
 big_entry:
+#ifdef BIG_BY_MPIDR
+        // slot from MPIDR (the monitor does not pass the context id):
+        // A55 (MT=1) 0x8100_0n00 -> n, M3 (MT=0) 0x8000_010n -> 4 + n
+        mrs     x1, mpidr_el1
+        tbz     x1, #24, 5f
+        ubfx    x10, x1, #8, #8
+        b       6f
+5:      and     x10, x1, #0xff
+        add     x10, x10, #4
+6:      and     x10, x10, #7
+#else
         and     x10, x0, #3
+#endif
         mrs     x1, CurrentEL
         ldr     x6, big_mb
         add     x6, x6, x10, lsl #5
@@ -283,8 +295,13 @@ big_entry:
         dsb     sy
         ldr     x7, big_fb
         mov     x8, #5760
+#ifdef BIG_BY_MPIDR
+        mov     x9, #1900
+        mov     x12, #120
+#else
         mov     x9, #1400
         mov     x12, #120
+#endif
         madd    x9, x10, x12, x9
         mul     x9, x9, x8
         add     x7, x7, x9
