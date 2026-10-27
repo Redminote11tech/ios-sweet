@@ -22,7 +22,7 @@ SIZE=$((16 << 30))
 WORK=/root/ios-root
 IMG=$WORK/phone-root.img
 MNT=/mnt/iosroot
-FILES=${ROOTFILES:-$HERE/rootfiles}
+FILES="$HERE/${ROOTFILES:-rootfiles}"    # ROOTFILES: folder name next to this script
 CH=$((1 << 20))
 RESUME=0
 [ "${1:-}" = "--writeback" ] && RESUME=1    # only redo step 3 from the last run's image

@@ -13,7 +13,7 @@ echo /private/var/mobile/Containers/Data/InternalDaemon/*/Library/Caches/com.app
 echo /private/var/mobile/Library/Caches/com.apple.LaunchServices*
 ) > rootfiles-ls\delete.txt
 echo Cleaning the LaunchServices caches (about 15-25 minutes). Leave this window open.
-wsl -u root -- bash -c "sed -i 's/\r$//' root-update.sh; ROOTFILES=$PWD/rootfiles-ls bash root-update.sh 2>&1 | tee clean-ls-cache.log"
+wsl -u root -- bash -c "sed -i 's/\r$//' root-update.sh; ROOTFILES=rootfiles-ls bash root-update.sh 2>&1 | tee clean-ls-cache.log"
 echo.
 echo Finished. Tell Claude (it reads clean-ls-cache.log).
 pause
