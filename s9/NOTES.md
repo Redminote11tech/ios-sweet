@@ -142,3 +142,17 @@ Handoff log for the Galaxy S9 port. Newest first. Observations are marked as suc
 - 2026-10-27 12:06 t13 via the probe log (pull-log, no screen): ALL 8 CORES RUN. CPU_ON 0x100-0x103 rc 0, MPIDR 0x80000100-0x80000103, LSE 0; then CPU_ON 1-3 rc 0, MPIDR 0x81000100/200/300, LSE 2; "CORES RUNNING: 8 of 8"; after: CL1 PLL 0xa0f60311 locked, NONCPU 0x10000f, cpu0/1 0x100f0f. Big-before-little and little-after-big both fine once the six PMU defaults are set.
 - Shim: shim_reboot_recovery(): log flush, then INFORM2 0x14060808 = 0x12345678, INFORM3 0x1406080c = 0x12345674 (Samsung recovery request), SWRESET -> TWRP without buttons (user's idea). cores8-log2.img tests it. scan-lse.bat/.sh: mounts /root/ios-root/phone-root.img read-only in WSL, counts LSE in libobjc/libsystem_*/libdispatch/CoreFoundation/libc++/QuartzCore/UIKitCore (qc-lse.py, pure python).
 - Next for 8 cores in iOS: SweetCPU applies the six PMU writes before CPU_ON(0x100+n); ADT M3 cpu nodes; XNU cpu matching must keep MT (MPIDR & 0x1ffffff: A55 0x1000n00 vs M3 0x10n) instead of Aff1:Aff0; LSE trap-and-emulate on the M3 (kernel too if built with LSE); GitHub Actions must be re-enabled to build.
+
+### 2026-10-27: M3 vs A55 ID registers (shim t13 + ID dump, cores8-id.img)
+| | M3 (MIDR 0x531F0020) | A55 (MIDR 0x410FD051) |
+|---|---|---|
+| ID_AA64MMFR0 | 0x101122 (TGran16 = 1: 16K pages OK) | 0x101122 |
+| ID_AA64ISAR0 | 0x11120 (no LSE, no RDM) | 0x10211120 (LSE, RDM) |
+| ID_AA64PFR0 | 0x2222 (no FP16) | 0x10112222 (FP16, RAS) |
+| ID_AA64ISAR1 | 0 | 0x100001 (LRCPC, DC CVAP) |
+
+So iOS (16K pages) can run on the big cores. Userland built for the A11
+(v8.2) may use LSE (emulated by xnu 0106), and more rarely FP16 / RDM /
+DC CVAP: those trap on the M3 and 0106 moves that thread to a little core.
+Kernel: 0106 still had ~1080 LSE atomics (Apple clang kept target-cpu
+apple-m1 under -march=armv8-a); 0107 builds with -mcpu=cortex-a53.
