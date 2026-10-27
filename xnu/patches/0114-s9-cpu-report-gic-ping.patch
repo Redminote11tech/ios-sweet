@@ -1,0 +1,95 @@
+From 12ebc799bd5fd5b67f8aaa969d7e42325cc3966e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 18:57:32 +0100
+Subject: [PATCH] 0114
+
+---
+ osfmk/kern/exception.c | 34 +++++++++++++++++++++++++++++++++-
+ pexpert/arm/pe_fiq.c   | 16 ++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a593784..c475444 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1147,10 +1147,42 @@ sys_perf_notify(thread_t thread, int pid)
+ void sweet_report_cpus(void);
+ void sweet_report_task_kernel(int pid, task_t task);
+ 
++extern void sweet_gic_cpu_info(unsigned int cpu, uint32_t *mask, uint32_t *enabled, uint32_t *ctlr);
++extern void sweet_gic_send_sgi(unsigned int cpu, uint64_t mpidr, unsigned int id);
++
+ void
+ sweet_report_cpus(void)
+ {
+-	printf("CPUR kernel slide 0x%lx\n", vm_kernel_slide);
++	uint64_t before[MAX_CPUS];
++	printf("CPUR kernel slide 0x%lx, report from cpu%d\n", vm_kernel_slide, cpu_number());
++	/* GIC view of each CPU, then ping every other CPU with an SGI and see who takes it */
++	for (int i = 0; i < MAX_CPUS; i++) {
++		cpu_data_t *cd = cpu_datap(i);
++		before[i] = cd ? cd->cpu_stat.ipi_cnt : 0;
++		if (cd == NULL) {
++			continue;
++		}
++		uint32_t mask, en, ctlr;
++		sweet_gic_cpu_info((unsigned)i, &mask, &en, &ctlr);
++		printf("CPUR cpu%d gic mask 0x%x enabled 0x%x ctlr/pmr 0x%x mpidr 0x%llx\n", i, mask, en, ctlr,
++		    (uint64_t)cd->cpu_phys_id);
++		if (i != cpu_number()) {
++			sweet_gic_send_sgi((unsigned)i, cd->cpu_phys_id, 1);
++		}
++	}
++	delay(20000);
++	{
++		char line[200];
++		int n = snprintf(line, sizeof(line), "CPUR SGI ping took:");
++		for (int i = 0; i < MAX_CPUS; i++) {
++			cpu_data_t *cd = cpu_datap(i);
++			if (cd != NULL && i != cpu_number()) {
++				n += snprintf(line + n, sizeof(line) - n, " cpu%d %s", i,
++				    cd->cpu_stat.ipi_cnt > before[i] ? "yes" : "NO");
++			}
++		}
++		printf("%s\n", line);
++	}
+ 	for (int i = 0; i < MAX_CPUS; i++) {
+ 		cpu_data_t *cd = cpu_datap(i);
+ 		if (cd == NULL) {
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index bbf8196..22032e3 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -35,6 +35,18 @@ SECURITY_READ_ONLY_LATE(bool) sweet_gic_v2 = false;
+ static vm_offset_t gicc_base;
+ /* GICD_ITARGETSR0 byte of each logical CPU: its GICv2 CPU interface mask. */
+ static uint8_t sweet_gic_v2_cpumask[SWEET_SMP_MAX_CPUS];
++static uint32_t sweet_gic_v2_enabled[SWEET_SMP_MAX_CPUS];     /* banked ISENABLER0 seen by that CPU */
++static uint32_t sweet_gic_v2_ctlr[SWEET_SMP_MAX_CPUS];        /* its GICC_CTLR / PMR (<< 16) */
++
++/* For the 8-core hang report (osfmk/kern/exception.c). */
++void sweet_gic_cpu_info(unsigned int cpu, uint32_t *mask, uint32_t *enabled, uint32_t *ctlr);
++void
++sweet_gic_cpu_info(unsigned int cpu, uint32_t *mask, uint32_t *enabled, uint32_t *ctlr)
++{
++	*mask = cpu < SWEET_SMP_MAX_CPUS ? sweet_gic_v2_cpumask[cpu] : 0;
++	*enabled = cpu < SWEET_SMP_MAX_CPUS ? sweet_gic_v2_enabled[cpu] : 0;
++	*ctlr = cpu < SWEET_SMP_MAX_CPUS ? sweet_gic_v2_ctlr[cpu] : 0;
++}
+ 
+ #define GICV2_GICD_CTLR         0x000
+ #define GICV2_GICD_IGROUPR0     0x080
+@@ -143,6 +155,10 @@ sweet_gic_v2_init_cpu(void)
+ 	__builtin_arm_dsb(DSB_SY);
+ 	__builtin_arm_isb(ISB_SY);
+ 
++	if (cpu < SWEET_SMP_MAX_CPUS) {
++		sweet_gic_v2_enabled[cpu] = gicd_read32(GICV2_GICD_ISENABLER0);
++		sweet_gic_v2_ctlr[cpu] = gicc_read32(GICV2_GICC_CTLR) | (gicc_read32(GICV2_GICC_PMR) << 16);
++	}
+ 	kprintf("SWEET GIC: cpu %u GICv2 mask 0x%x timer INTID %u enabled 0x%x\n",
+ 	    cpu, mask, sweet_vtimer_intid, gicd_read32(GICV2_GICD_ISENABLER0));
+ }
+-- 
+2.43.0
+
