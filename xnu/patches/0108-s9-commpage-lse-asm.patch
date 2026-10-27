@@ -1,0 +1,27 @@
+From 5254057cbf83d028f6d06673727ad3a081811714 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 13:00:30 +0100
+Subject: [PATCH] 0108
+
+---
+ osfmk/arm/commpage/commpage_asm.s | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/osfmk/arm/commpage/commpage_asm.s b/osfmk/arm/commpage/commpage_asm.s
+index da0bbba..95403f5 100644
+--- a/osfmk/arm/commpage/commpage_asm.s
++++ b/osfmk/arm/commpage/commpage_asm.s
+@@ -263,6 +263,10 @@ _jump_table:				// 32 entry jump table, only 2 are used
+  *
+  * Returns 0 on success and non-zero value on failure
+  */
++#if SWEET_ARMV80
++	/* user (commpage) code: the kernel emulates casa when it traps on an M3 core */
++	.arch_extension lse
++#endif
+ 	.globl _pfz_trylock_and_enqueue
+ 	.align 2
+ _pfz_trylock_and_enqueue:
+-- 
+2.43.0
+
