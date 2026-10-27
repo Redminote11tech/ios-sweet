@@ -20,6 +20,9 @@ on:
       ramdisk:
         description: "RAM disk root: init (tools/sweet-init as /sbin/launchd, add rd=md0) or none"
         default: "init"
+      mtids:
+        description: "1 = cpu 'reg' with the MPIDR MT bit (SWEET_ARMV80 kernels, xnu 0106+); 0 = older kernels"
+        default: "1"
       cmdline:
         description: XNU boot-args
         default: "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin"
@@ -80,7 +83,7 @@ jobs:
             ls -la kernel
             K=kernel/kernel.development.sweet
             [ -f "$K" ] || K=$(ls kernel/kernel.development.* | grep -v dSYM | head -1)
-            python3 s9/tools/mkadt_s9.py s9.adt --dump > dist/s9-adt.txt
+            S9_MT_IDS="${{ inputs.mtids || '1' }}" python3 s9/tools/mkadt_s9.py s9.adt --dump > dist/s9-adt.txt
             RD=""
             if [ "${{ inputs.ramdisk || 'init' }}" = init ]; then
               # mockfs serves the RAM disk itself as /sbin/launchd (patches 0021/0024)

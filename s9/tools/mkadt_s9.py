@@ -77,6 +77,7 @@ def build(seed=None):
     # the shim's SMP probe 6); the Mongoose cores are Aff1 = cluster, Aff0 = core.
     # 'psci-id' is the index the firmware's PSCI CPU_ON wants (1..3 start the
     # A55s; it accepts 0x100.. for the Mongooses but those still hang, see NOTES).
+    MT_IDS = os.environ.get('S9_MT_IDS', '') == '1'
     cpu_nodes = []
     for core in range(8):
         big = core >= 4
@@ -84,6 +85,10 @@ def build(seed=None):
         # XNU maps nodes to CPUs by 'reg' & 0xffff, so the big cores get an
         # unused placeholder (0xf0n) until they can actually be started.
         mpidr = (0xf00 | (core - 4)) if big else (core << 8)
+        if MT_IDS:
+            # SWEET_ARMV80 kernels (xnu patch 0106) match MPIDR & 0x1ffffff,
+            # keeping the A55s' MT bit: A55 0x1000n00, M3 0x10n, no collision.
+            mpidr = (0x100 | (core - 4)) if big else (0x1000000 | core << 8)
         psci_id = (0x100 | (core - 4)) if big else core
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
