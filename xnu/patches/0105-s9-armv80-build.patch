@@ -1,0 +1,43 @@
+From 3fd3d19ce3b660a4f52b723f1f0a69fcea3e4765 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 12:20:13 +0100
+Subject: [PATCH] 0105
+
+---
+ makedefs/MakeInc.def          | 4 +++-
+ pexpert/pexpert/arm64/SWEET.h | 4 +++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 9a748ea..4e20753 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -61,7 +61,9 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+-MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
++# SWEET_ARMV80=1 (Galaxy S9): ARMv8.0 code for the Exynos 9810's Mongoose M3
++# cores (no LSE atomics, PAN or UAO; the A55s are v8.2 but run v8.0 code).
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET $(if $(SWEET_ARMV80),-march=armv8-a+crypto -DSWEET_ARMV80=1,-march=armv8.2-a+crypto)
+ 
+ 
+ #
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..2896ee1 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -33,7 +33,9 @@
+ #define __ARM_DEBUG__             7
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
+-#define __ARM_PAN_AVAILABLE__     1
++#if !SWEET_ARMV80
++#define __ARM_PAN_AVAILABLE__     1   /* ARMv8.1: not on the S9's Mongoose M3 cores */
++#endif
+ #define __ARM_16K_PG__            1
+ 
+ #define HAS_GIC_V3                1
+-- 
+2.43.0
+

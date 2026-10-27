@@ -75,6 +75,8 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
+          # Galaxy S9: ARMv8.0 kernel (Mongoose M3 cores have no LSE/PAN), patch 0105
+          SWEET_ARMV80: "1"
         run: |
           set -o pipefail
           bash build.sh 2>&1 | tee "$RUNNER_TEMP/build.log" || {
