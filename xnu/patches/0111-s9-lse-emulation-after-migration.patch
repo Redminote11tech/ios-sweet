@@ -1,0 +1,39 @@
+From e550e33e22eb3b0158bd708d5ee9aad32f88889f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 27 Oct 2026 13:49:49 +0100
+Subject: [PATCH] 0111
+
+---
+ osfmk/arm64/sleh.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index bdc994a..6d36f55 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1011,7 +1011,12 @@ sweet_lse_stats(void)
+ static bool
+ sweet_big_core_undef(arm_saved_state_t *state, uint32_t instr)
+ {
+-	if (!sweet_lse_emul || !sweet_on_big_core()) {
++	/*
++	 * No big-core check: interrupts are back on here, so the thread may
++	 * already have been preempted onto an A55 since the trap on the M3.
++	 * The A55s never trap on these encodings, so the trap itself is proof.
++	 */
++	if (!sweet_lse_emul) {
+ 		return false;
+ 	}
+ 	user_addr_t a = 0;
+@@ -1036,7 +1041,7 @@ sweet_big_core_undef(arm_saved_state_t *state, uint32_t instr)
+ 		__builtin_unreachable();
+ 	}
+ 	/* another ARMv8.1+ instruction: retry it on a little core (cpus 0-3 are the A55s) */
+-	if (!ml_get_interrupts_enabled()) {
++	if (!sweet_on_big_core() || !ml_get_interrupts_enabled()) {
+ 		return false;
+ 	}
+ 	processor_t p = cpu_to_processor((int)(sweet_lse_moved++ & 3));
+-- 
+2.43.0
+
