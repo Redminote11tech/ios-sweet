@@ -61,6 +61,10 @@ link t9-Image out/nopayload.o
 # t10: ACPM (APM firmware) plugin table, read-only
 clang $CFLAGS -DACPMTEST -c main.c -o out/main.o
 link t10-Image out/nopayload.o
+
+# t11: t9 with Samsung's flexpmu core10_on sequence before CPU_ON(0x100)
+clang $CFLAGS -DBIGTEST -DBIGTEST2 -c main.c -o out/main.o
+link t11-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

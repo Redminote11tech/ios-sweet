@@ -2252,12 +2252,28 @@ static int big_start(u64 target, u32 ctx)
 static void big_test(void)
 {
     color(HEAD);
+#ifdef BIGTEST2
+    puts_("Big-core probe (t11): core10_on sequence, then CPU_ON\n");
+#else
     puts_("Big-core probe (t9): Mongoose cluster\n");
+#endif
     color(FG);
     u64 mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     kvh("  boot MPIDR ", (u32)mpidr, "  entry ", (u32)(u64)big_entry);
     big_state("before:\n");
+#ifdef BIGTEST2
+    // t11: Samsung's flexpmu core10_on first (big core 0 = bit 0):
+    // GRP2_INTR_BID_ENABLE clear, pending clear, PMU event enable clear
+    kvh("  BID_EN ", safe_rd32(0x14070200UL), "  BID_PEND ", safe_rd32(0x14070208UL));
+    kvh("  EVT_EN ", safe_rd32(0x14060000UL + 0x7f08), "  GRP1 EN ", safe_rd32(0x14070100UL));
+    safe_wr32(0x14070200UL, safe_rd32(0x14070200UL) & ~1u);
+    if (safe_rd32(0x14070208UL) & 1u)
+        safe_wr32(0x1407020cUL, 1u);
+    safe_wr32(0x14060000UL + 0x7f08, safe_rd32(0x14060000UL + 0x7f08) & ~1u);
+    safe_wr32(0x14100010UL, safe_rd32(0x14100010UL) & ~(1u << 24));
+    kvh("  after: BID_EN ", safe_rd32(0x14070200UL), "  EVT_EN ", safe_rd32(0x14060000UL + 0x7f08));
+#endif
     int b0 = big_start(0x100, 0);
     big_state("after big 0:\n");
     if (!b0) {
