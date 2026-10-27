@@ -1,0 +1,18 @@
+cputype: 0x100000c
+cpusub: 0
+fixups: 0
+virt_base: 0xfffffe0006000000
+entry: 0xfffffe00074af488
+kernel_end: 0xfffffe0008560000
+ramdisk: None
+size: 17092080
+   __TEXT 0xfffffe0007004000 0x164000
+   __DATA_CONST 0xfffffe0007168000 0x184000
+   __TEXT_EXEC 0xfffffe00072ec000 0x8bc000
+   __KLD 0xfffffe0007ba8000 0x4000
+   __LASTDATA_CONST 0xfffffe0007bac000 0x4000
+   __KLDDATA 0xfffffe0007bb0000 0x4000
+   __DATA 0xfffffe0007bb4000 0x558000
+   __BOOTDATA 0xfffffe000810c000 0x4c000
+   __LINKINFO 0xfffffe0008158000 0x4c000
+   __LINKEDIT 0xfffffe00081a4000 0x3bc000

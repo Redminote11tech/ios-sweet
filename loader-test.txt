@@ -1,0 +1,19 @@
+main.c:2363:13: warning: ‘shim_reboot_recovery’ defined but not used [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+main.c:2362:13: warning: ‘shimlog_flush’ defined but not used [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+entry pa 0x8814af488, ADT at 0x882560000 (matches), boot_args at 0x882564000
+Video base 0xcc000000 rowBytes 5760 1440x2960 depth 32; cmdline 'debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 sweetsample=launchd,SpringBoard,backboardd sweetnull=backboardd,SpringBoard,PosterBoard sweetenv=backboardd:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib,SWEETGL_EAGL=1;PosterBoard:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib,SWEETGL_OSLOG=1'
+  seg 0 va 0xfffffe0007004000 size 0x164000 copied OK
+  seg 1 va 0xfffffe0007168000 size 0x184000 copied OK
+  seg 2 va 0xfffffe00072ec000 size 0x8bc000 copied OK
+  seg 3 va 0xfffffe0007ba8000 size 0x4000 copied OK
+  seg 4 va 0xfffffe0007bac000 size 0x4000 copied OK
+  seg 5 va 0xfffffe0007bb0000 size 0x4000 copied OK
+  seg 6 va 0xfffffe0007bb4000 size 0x558000 copied OK
+  seg 7 va 0xfffffe000810c000 size 0x4c000 copied OK
+  seg 8 va 0xfffffe0008158000 size 0x4c000 copied OK
+  seg 9 va 0xfffffe00081a4000 size 0x3bc000 copied OK
+wrote t2-preview.ppm

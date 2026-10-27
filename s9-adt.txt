@@ -1,0 +1,344 @@
+device-tree {
+  AAPL,phandle = 0x19
+  compatible = 'D22AP|iPhone10,3|xiaomi,sweet|samsung,starlte|samsung,exynos9810|AppleARM'
+  model = 'iPhone10,3'
+  target-type = 'D22'
+  target-sub-type = 'D22AP'
+  manufacturer = 'Apple Inc.'
+  #address-cells = 0x2
+  #size-cells = 0x2
+  chosen {
+    AAPL,phandle = 0x1
+    dram-base = 0x880000000
+    dram-size = 0x7ff00000
+    random-seed = <0x161ff468fce9a256 0x4973c755f53e72a2 0xe48dd3ac3fce3b2d 0x7c8a6e7bb1361baf 0xc01706241075bbd0 0x36475cfc2416793f 0xb8f72b82743092da 0xbaa2f514d54b5ae4>
+    debug-enabled = 0x1
+    embedded-panic-log-size = 0x100000
+    firmware-version = 's9-shim'
+    system-firmware-version = 's9-shim'
+    boot-manifest-hash = <0x15837d1d0136be5c 0xcaff932a12f1cd15 0xad884319e9058bd4 0xa0a5e41a2a75e912 0x15398378b0034b9 0x552ff6f087e1d04>
+    crypto-hash-method = 'sha2-384'
+    display-scale = 0x3
+    unique-chip-id = 0x5339000000000001
+    chip-id = 0x8015
+    certificate-production-status = ''
+    effective-production-status-ap = ''
+    certificate-security-mode = 0x1
+    effective-security-mode-sep = 0x1
+    memory-map {
+      AAPL,phandle = 0x2
+    }
+    asmb {
+      AAPL,phandle = 0x3
+      lp-sip0 = 'o'
+      lp-sip1 = 0x1
+    }
+  }
+  defaults {
+    AAPL,phandle = 0x12
+    no-effaceable-storage = 0x1
+  }
+  cpus {
+    AAPL,phandle = 0xc
+    #address-cells = 0x1
+    #size-cells = ''
+    cpu0 {
+      AAPL,phandle = 0x4
+      device_type = 'cpu'
+      compatible = 'arm,cortex-a55|qcom,kryo470|ARM,v8'
+      reg = 0x1000000
+      psci-id = ''
+      psci-trampoline = 0xef3f0000
+      cpu-id = ''
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = ''
+      l2-cache-id = ''
+      l3-cache-id = ''
+      state = 'running'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0x6aee4480
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu1 {
+      AAPL,phandle = 0x5
+      device_type = 'cpu'
+      compatible = 'arm,cortex-a55|qcom,kryo470|ARM,v8'
+      reg = 0x1000100
+      psci-id = 0x1
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x1
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x1
+      l2-cache-id = ''
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0x6aee4480
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu2 {
+      AAPL,phandle = 0x6
+      device_type = 'cpu'
+      compatible = 'arm,cortex-a55|qcom,kryo470|ARM,v8'
+      reg = 0x1000200
+      psci-id = 0x2
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x2
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x2
+      l2-cache-id = ''
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0x6aee4480
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu3 {
+      AAPL,phandle = 0x7
+      device_type = 'cpu'
+      compatible = 'arm,cortex-a55|qcom,kryo470|ARM,v8'
+      reg = 0x1000300
+      psci-id = 0x3
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x3
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x3
+      l2-cache-id = ''
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0x6aee4480
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu4 {
+      AAPL,phandle = 0x8
+      device_type = 'cpu'
+      compatible = 'samsung,mongoose-m3|qcom,kryo470|ARM,v8'
+      reg = 0x100
+      psci-id = 0x100
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x4
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x4
+      l2-cache-id = 0x1
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0xa12bc400
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu5 {
+      AAPL,phandle = 0x9
+      device_type = 'cpu'
+      compatible = 'samsung,mongoose-m3|qcom,kryo470|ARM,v8'
+      reg = 0x101
+      psci-id = 0x101
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x5
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x5
+      l2-cache-id = 0x1
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0xa12bc400
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu6 {
+      AAPL,phandle = 0xa
+      device_type = 'cpu'
+      compatible = 'samsung,mongoose-m3|qcom,kryo470|ARM,v8'
+      reg = 0x102
+      psci-id = 0x102
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x6
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x6
+      l2-cache-id = 0x1
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0xa12bc400
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+    cpu7 {
+      AAPL,phandle = 0xb
+      device_type = 'cpu'
+      compatible = 'samsung,mongoose-m3|qcom,kryo470|ARM,v8'
+      reg = 0x103
+      psci-id = 0x103
+      psci-trampoline = 0xef3f0000
+      cpu-id = 0x7
+      cluster-id = ''
+      cluster-type = ''
+      die-cluster-id = ''
+      cluster-core-id = 0x7
+      l2-cache-id = 0x1
+      l3-cache-id = ''
+      state = 'stopped'
+      timebase-frequency = 0x18cba80
+      clock-frequency = 0xa12bc400
+      bus-frequency = 0x5f5e100
+      memory-frequency = 0x6aee4480
+      peripheral-frequency = 0x18cba80
+      fixed-frequency = 0x18cba80
+    }
+  }
+  arm-io {
+    AAPL,phandle = 0xe
+    device_type = 'sweet-io'
+    compatible = 'sweet-io|arm-io'
+    #address-cells = 0x2
+    #size-cells = 0x2
+    ranges = <0x0 0x1000000 0xff000000>
+    gic {
+      AAPL,phandle = 0xd
+      compatible = 'arm,gic-400|arm,cortex-a15-gic'
+      interrupt-controller = <>
+      virtual-timer-intid = 0x1b
+      reg = <0xf101000 0x1000 0xf102000 0x2000>
+    }
+    wdt {
+      AAPL,phandle = 0xf
+      no-pmu = 0x1
+    }
+    disp0 {
+      AAPL,phandle = 0x10
+      device_type = 'display-subsystem'
+      compatible = 'sweet,display'
+      canvas-width = 0x465
+      canvas-height = 0x984
+    }
+  }
+  sweet-fbcon {
+    AAPL,phandle = 0x11
+    reg = <0xcc000000 0x1200000>
+    width = 0x5a0
+    height = 0xb90
+    stride = 0x1680
+  }
+  sweet-ufs {
+    AAPL,phandle = 0x16
+    compatible = 'samsung,exynos9810-ufs'
+    reg = <0x11120000 0x100>
+    exynos-vs = <0x11121100 0x100>
+  }
+  s9-input {
+    AAPL,phandle = 0x17
+    compatible = 'samsung,starlte-input'
+  }
+  s9-gpu {
+    AAPL,phandle = 0x18
+    compatible = 'arm,mali-bifrost'
+    reg = <0x17500000 0x5000>
+  }
+  buttons {
+    AAPL,phandle = 0x13
+    button-names = 'volup|voldown|hold'
+    home-button-type = 0x2
+    opposed-power-vol-buttons = 0x1
+  }
+  pram {
+    AAPL,phandle = 0x15
+    reg = <0x8fff00000 0x100000>
+  }
+  product {
+    AAPL,phandle = 0x14
+    sandman-support = 0x1
+    display-mirroring = 0x1
+    car-integration = 0x1
+    assistant = 0x1
+    lockdown-certtype = 0x1
+    ui-pip = 0x1
+    wifi-chipset = '4357'
+    product-name = 'iPhone X'
+    hearingaid-audio-equalization = 0x1
+    RF-exposure-separation-distance = 0x5
+    mobiledevice-min-ver = '1400'
+    product-id = <0x299b07fd 0xdea74481 0x7fc8d7b4 0x74b43eef 0xebe7f0d8>
+    gps-capable = 0x1
+    product-description = 'iPhone X'
+    allow-32bit-apps = 0x1
+    low-power-wallet-mode = 0x1
+    builtin-mics = 0x4
+    has-boot-chime = ''
+    supports-burnin-mitigation = 0x1
+    compatible-device-fallback = 'iPhone9,2'
+    device-perf-memory-class = 0x4
+    artwork-scale-factor = 0x3
+    baseband-chipset = 'mav17'
+    hearingaid-low-energy-audio = 0x1
+    ui-background-quality = 'd'
+    supports-avatars = <>
+    public-key-accelerator = 0x1
+    disable-globe-map = <>
+    artwork-device-idiom = 'phone'
+    device-color-policy = ''
+    graphics-featureset-class = 'APPLE4'
+    siri-gesture = 0x1
+    supports-maps-optical-heading = <>
+    compatible-app-variant = '0'
+    artwork-dynamic-displaymode = '0'
+    bluetooth-le = 0x1
+    watch-companion = 0x1
+    has-applelpm = ''
+    iap2-protocol-supported = 0x1
+    ephemeral-data-mode = ''
+    activation-protocol-version = 0x2
+    volume-up-button-location = <0x9b078 0x1496ff 0x3e030 0x19dca 0x2710>
+    ptp-large-files = 0x1
+    udid-version = 0x1
+    offline-dictation = 0x1
+    location-reminders = 0x1
+    ui-weather-quality = 'd'
+    graphics-featureset-fallbacks = 'APPLE3:APPLE3v1:APPLE2:APPLE1:GLES2,0'
+    dictation = 0x1
+    itunes-min-ver = 0xc0703
+    artwork-display-gamut = 'sRGB'
+    front-cam-offset-from-center = <0x1d9e000101d0 0x3e8>
+    ui-reachability = 0x1
+    volume-down-button-location = <0x9b078 0x1496ff 0x5d048 0x19dca 0x2710>
+    personal-hotspot = 0x1
+    single-stage-boot = 0x1
+    mobiledevice-beta-min-ver = '1190.100.2'
+    oled-display = 0x1
+    thin-bezel = 0x1
+    artwork-device-subtype = 0x984
+    side-button-location = <0xf375 0x20f2a 0x7100 0x3fea 0x3e8>
+  }
+}

@@ -1,0 +1,130 @@
++ ls -la kernel
+total 17292
+drwxr-xr-x  4 runner runner     4096 Oct 27 14:27 .
+drwxr-xr-x 13 runner runner     4096 Oct 27 14:27 ..
+-rw-r--r--  1 runner runner       91 Oct 27 14:27 SHA256SUMS
+drwxr-xr-x  2 runner runner     4096 Oct 27 14:27 kdk-libs
+-rw-r--r--  1 runner runner 17683224 Oct 27 14:27 kernel.development.sweet
+drwxr-xr-x  3 runner runner     4096 Oct 27 14:27 kernel.development.sweet.link
++ K=kernel/kernel.development.sweet
++ '[' -f kernel/kernel.development.sweet ']'
++ S9_MT_IDS=1
++ python3 s9/tools/mkadt_s9.py s9.adt --dump
+s9.adt: 14048 bytes
++ RD=
++ '[' none = init ']'
++ python3 tools/mkpayload.py kernel/kernel.development.sweet s9.adt payload.bin --cmdline 'debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 sweetkeys=0 sweettouch=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 sweetsample=launchd,SpringBoard,backboardd sweetnull=backboardd,SpringBoard,PosterBoard sweetenv=backboardd:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib,SWEETGL_EAGL=1;PosterBoard:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib,SWEETGL_OSLOG=1'
++ tee dist/payload.txt
+cputype: 0x100000c
+cpusub: 0
+fixups: 0
+virt_base: 0xfffffe0006000000
+entry: 0xfffffe00074af488
+kernel_end: 0xfffffe0008560000
+ramdisk: None
+size: 17092080
+   __TEXT 0xfffffe0007004000 0x164000
+   __DATA_CONST 0xfffffe0007168000 0x184000
+   __TEXT_EXEC 0xfffffe00072ec000 0x8bc000
+   __KLD 0xfffffe0007ba8000 0x4000
+   __LASTDATA_CONST 0xfffffe0007bac000 0x4000
+   __KLDDATA 0xfffffe0007bb0000 0x4000
+   __DATA 0xfffffe0007bb4000 0x558000
+   __BOOTDATA 0xfffffe000810c000 0x4c000
+   __LINKINFO 0xfffffe0008158000 0x4c000
+   __LINKEDIT 0xfffffe00081a4000 0x3bc000
++ sh s9/shim/build.sh payload.bin
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t2-Image (114688 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t4-Image (106496 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t5-Image (110592 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t6-Image (110592 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t7-Image (102400 bytes)
+main.c:2159:13: warning: unused function 'smp_try' [-Wunused-function]
+ 2159 | static void smp_try(u64 mpidr, u64 entry, u32 ctx, int pmuseq, int sgi)
+      |             ^~~~~~~
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+3 warnings generated.
+built t8-Image (98304 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t9-Image (102400 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t10-Image (98304 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t11-Image (102400 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built t12-Image (102400 bytes)
+built t13-Image (167936 bytes)
+main.c:2362:13: warning: unused function 'shimlog_flush' [-Wunused-function]
+ 2362 | static void shimlog_flush(void) {}
+      |             ^~~~~~~~~~~~~
+main.c:2363:13: warning: unused function 'shim_reboot_recovery' [-Wunused-function]
+ 2363 | static void shim_reboot_recovery(u32 secs) { (void)secs; }
+      |             ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated.
+built xnu-Image (17207296 bytes)
++ cp s9/shim/xnu-Image s9/shim/t2-Image s9/shim/t0-Image s9.adt dist/
++ cp kernel/kernel.development.sweet dist/
