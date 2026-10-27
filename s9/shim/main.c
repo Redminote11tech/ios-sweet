@@ -2341,8 +2341,26 @@ static void shimlog_flush(void)
         color(FG);
     }
 }
+
+// After the log is on disk: restart into TWRP without buttons. Samsung's
+// recovery request (as galaxy-s9plus-mainline-linux / sec_reboot): PMU
+// INFORM2 0x14060808 = 0x12345678, INFORM3 0x1406080c = 0x12345674, then
+// SWRESET (0x14060400 = 1). S-Boot reads INFORM3 and boots RECOVERY.
+static void shim_reboot_recovery(u32 secs)
+{
+    puts_("restarting into TWRP\n");
+    shimlog_flush();
+    wait_ticks((u64)secs * TB_HZ);
+    safe_wr32(0x14060808UL, 0x12345678);
+    safe_wr32(0x1406080cUL, 0x12345674);
+    __asm__ volatile("dsb sy" ::: "memory");
+    safe_wr32(0x14060400UL, 1);
+    for (;;)
+        __asm__ volatile("wfi");
+}
 #else
 static void shimlog_flush(void) {}
+static void shim_reboot_recovery(u32 secs) { (void)secs; }
 #endif
 
 // ---------------------------------------------------------------- big-core probe (t9)
@@ -2461,6 +2479,7 @@ static void all_test(void)
     big_state("cluster 1 now:\n");
     puts_("t13 done\n");
     shimlog_flush();
+    shim_reboot_recovery(3);
     for (;;)
         __asm__ volatile("wfe");
 }
