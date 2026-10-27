@@ -22,13 +22,16 @@ SIZE=$((16 << 30))
 WORK=/root/ios-root
 IMG=$WORK/phone-root.img
 MNT=/mnt/iosroot
-FILES=$HERE/rootfiles
+FILES=${ROOTFILES:-$HERE/rootfiles}
 CH=$((1 << 20))
 RESUME=0
 [ "${1:-}" = "--writeback" ] && RESUME=1    # only redo step 3 from the last run's image
 [ "${1:-}" = "--extents" ] && RESUME=2      # only step 4, from the last run's image
 mkdir -p "$WORK" "$MNT"
-[ -s "$FILES/install.txt" ] || { echo "no rootfiles/install.txt"; exit 1; }
+# rootfiles/delete.txt (optional): one path pattern per line (shell glob,
+# from the root), deleted after the installs (e.g. stale caches)
+touch "$FILES/install.txt"
+[ -s "$FILES/install.txt" ] || [ -s "$FILES/delete.txt" ] || { echo "no rootfiles/install.txt or delete.txt"; exit 1; }
 command -v fsck.hfsplus >/dev/null || apt-get install -y -q hfsprogs >/dev/null
 grep -qw hfsplus /proc/filesystems || modprobe hfsplus || { echo "RESULT: NO_HFSPLUS (run use-hfs-kernel.bat)"; exit 3; }
 
@@ -89,6 +92,19 @@ sed 's/\r$//' "$FILES/install.txt" | while read -r src dest mode; do
 	echo "  extents: $(wc -l < "$FILES/extents-$(basename "$dest").txt"), size $(stat -c %s "$MNT$dest")"
 	stat -c %s "$MNT$dest" > "$FILES/size-$(basename "$dest").txt"
 done
+if [ -s "$FILES/delete.txt" ]; then
+	echo "--- LaunchServices / extension caches before:"
+	find "$MNT/private/var" \( -iname '*LaunchServices*' -o -iname '*extensionkit*' -o -iname '*ExtensionFoundation*' \) 2>/dev/null | sed "s|^$MNT||" | head -40
+	sed 's/\r$//' "$FILES/delete.txt" | while read -r pat; do
+		[ -n "$pat" ] && [ "${pat#\#}" = "$pat" ] || continue
+		for f in $MNT$pat; do
+			[ -e "$f" ] || continue
+			echo "delete ${f#$MNT}"
+			rm -rf "$f"
+		done
+	done
+	sync
+fi
 umount "$MNT"
 trap - EXIT
 fsck.hfsplus -fy "$IMG" || true
