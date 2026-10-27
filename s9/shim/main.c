@@ -2398,8 +2398,8 @@ static void big_state(const char *what)
 
 static int big_start(u64 target, u32 ctx)
 {
-    u64 mb = BIG_MB + ctx * 32;
-    for (int i = 0; i < 32; i += 4)
+    u64 mb = BIG_MB + ctx * 64;
+    for (int i = 0; i < 64; i += 4)
         wr32(mb + i, 0);
     __asm__ volatile("dsb sy" ::: "memory");
     color(HEAD);
@@ -2441,13 +2441,24 @@ static void all_test(void)
         u64 a = 0x14060000UL + m3def[i][0];
         safe_wr32(a, (safe_rd32(a) & ~m3def[i][1]) | m3def[i][2]);
     }
-    for (int i = 0; i < 0x100; i += 4)
+    for (int i = 0; i < 0x200; i += 4)
         wr32(BIG_MB + i, 0);
     __asm__ volatile("dsb sy" ::: "memory");
+    {
+        u64 v;
+        __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(v));
+        kvh("boot A55 MMFR0 ", v, "  TGran16 ", (v >> 20) & 0xf);
+        __asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(v));
+        kvh("boot A55 PFR0 ", v, "  FP ", (v >> 16) & 0xf);
+        __asm__ volatile("mrs %0, id_aa64isar0_el1" : "=r"(v));
+        kvh("boot A55 ISAR0 ", v, "", 0);
+        __asm__ volatile("mrs %0, id_aa64isar1_el1" : "=r"(v));
+        kvh("boot A55 ISAR1 ", v, "", 0);
+    }
     static const u32 tgt[7] = {0x100, 0x101, 0x102, 0x103, 0x1, 0x2, 0x3};
     static const u32 idx[7] = {4, 5, 6, 7, 1, 2, 3};
     for (int i = 0; i < 7; i++) {
-        u64 mb = BIG_MB + idx[i] * 32;
+        u64 mb = BIG_MB + idx[i] * 64;
         kvh("starting ", tgt[i], " ...", 0);
         shimlog_flush();
         u64 rc = psci_call(0xC4000003UL, tgt[i], (u64)big_entry, 0);
@@ -2463,14 +2474,26 @@ static void all_test(void)
             puts_("  LSE ");
             hex((rd32(mb + 16) >> 20) & 0xf, 1);
             puts_("\n");
+            u64 isar0 = rd32(mb + 16) | (u64)rd32(mb + 20) << 32;
+            u64 mmfr0 = rd32(mb + 32) | (u64)rd32(mb + 36) << 32;
+            u64 pfr0 = rd32(mb + 40) | (u64)rd32(mb + 44) << 32;
+            u64 isar1 = rd32(mb + 48) | (u64)rd32(mb + 52) << 32;
+            kvh("    MIDR ", rd32(mb + 12), "  ISAR0 ", isar0);
+            kvh("    MMFR0 ", mmfr0, "  TGran16 ", (mmfr0 >> 20) & 0xf);
+            kvh("    TGran4 ", (mmfr0 >> 28) & 0xf, "  TGran64 ", (mmfr0 >> 24) & 0xf);
+            kvh("    PFR0 ", pfr0, "  FP ", (pfr0 >> 16) & 0xf);
+            kvh("    AdvSIMD ", (pfr0 >> 20) & 0xf, "  RDM ", (isar0 >> 28) & 0xf);
+            kvh("    DotProd ", (isar0 >> 44) & 0xf, "  ISAR1 ", isar1);
+            kvh("    LRCPC ", (isar1 >> 20) & 0xf, "  JSCVT ", (isar1 >> 12) & 0xf);
+            kvh("    FCMA ", (isar1 >> 16) & 0xf, "  DPB ", isar1 & 0xf);
         }
         color(FG);
     }
     wait_ticks(TB_HZ);
     int n = 1;
     for (int i = 1; i < 8; i++) {
-        u32 c0 = rd32(BIG_MB + i * 32 + 8);
-        n += rd32(BIG_MB + i * 32) >> 16 == 0xb16c;
+        u32 c0 = rd32(BIG_MB + i * 64 + 8);
+        n += rd32(BIG_MB + i * 64) >> 16 == 0xb16c;
         (void)c0;
     }
     color(n == 8 ? OK : HEAD);

@@ -280,7 +280,7 @@ big_entry:
 #endif
         mrs     x1, CurrentEL
         ldr     x6, big_mb
-        add     x6, x6, x10, lsl #5
+        add     x6, x6, x10, lsl #6
         movz    w3, #0xb16c, lsl #16
         orr     w3, w3, w1
         str     w3, [x6]
@@ -292,6 +292,12 @@ big_entry:
         str     x1, [x6, #16]
         mrs     x1, id_aa64mmfr1_el1
         str     x1, [x6, #24]
+        mrs     x1, id_aa64mmfr0_el1
+        str     x1, [x6, #32]
+        mrs     x1, id_aa64pfr0_el1
+        str     x1, [x6, #40]
+        mrs     x1, id_aa64isar1_el1
+        str     x1, [x6, #48]
         dsb     sy
         ldr     x7, big_fb
         mov     x8, #5760
