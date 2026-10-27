@@ -65,6 +65,10 @@ link t10-Image out/nopayload.o
 # t11: t9 with Samsung's flexpmu core10_on sequence before CPU_ON(0x100)
 clang $CFLAGS -DBIGTEST -DBIGTEST2 -c main.c -o out/main.o
 link t11-Image out/nopayload.o
+
+# t12: t9 with the six CPUCL1 PMU defaults (Samsung pmucal_lpm_init) first
+clang $CFLAGS -DBIGTEST -DBIGTEST3 -c main.c -o out/main.o
+link t12-Image out/nopayload.o
 clang $CFLAGS -c main.c -o out/main.o
 
 if [ -n "$PAYLOAD" ]; then

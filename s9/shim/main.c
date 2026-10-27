@@ -2227,8 +2227,8 @@ static void big_state(const char *what)
 
 static int big_start(u64 target, u32 ctx)
 {
-    u64 mb = BIG_MB + ctx * 16;
-    for (int i = 0; i < 16; i += 4)
+    u64 mb = BIG_MB + ctx * 32;
+    for (int i = 0; i < 32; i += 4)
         wr32(mb + i, 0);
     __asm__ volatile("dsb sy" ::: "memory");
     color(HEAD);
@@ -2242,6 +2242,11 @@ static int big_start(u64 target, u32 ctx)
     wait_ticks(TB_HZ / 2);
     kvh("  rc ", (u32)rc, "  hello ", rd32(mb));
     kvh("  MPIDR ", rd32(mb + 4), "  counting ", rd32(mb + 8) != c1);
+    if (rd32(mb) >> 16 == 0xb16c) {
+        u32 isar0 = rd32(mb + 16);
+        kvh("  MIDR ", rd32(mb + 12), "  ISAR0 ", isar0);
+        kvh("  MMFR1 ", rd32(mb + 24), "  LSE atomics ", (isar0 >> 20) & 0xf);
+    }
     int ran = rd32(mb) >> 16 == 0xb16c;
     color(ran ? OK : BAD);
     puts_(ran ? "  CORE RUNS\n" : "  no sign of life\n");
@@ -2252,7 +2257,9 @@ static int big_start(u64 target, u32 ctx)
 static void big_test(void)
 {
     color(HEAD);
-#ifdef BIGTEST2
+#if defined(BIGTEST3)
+    puts_("Big-core probe (t12): Samsung M3 PMU defaults, then CPU_ON\n");
+#elif defined(BIGTEST2)
     puts_("Big-core probe (t11): core10_on sequence, then CPU_ON\n");
 #else
     puts_("Big-core probe (t9): Mongoose cluster\n");
@@ -2262,6 +2269,22 @@ static void big_test(void)
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     kvh("  boot MPIDR ", (u32)mpidr, "  entry ", (u32)(u64)big_entry);
     big_state("before:\n");
+#ifdef BIGTEST3
+    // t12: the six CPUCL1 PMU defaults from Samsung's pmucal_lpm_init (what
+    // galaxy-s9plus-mainline-linux applies before CPU_ON; S-Boot leaves them)
+    static const u32 m3def[6][3] = {
+        {0x1088, 0xff000000, 0x8d000000},   /* CPU_QCH_CLUSTER1_NONCPU_SYS_PWR_REG */
+        {0x2114, 3, 2}, {0x2180, 3, 2}, {0x21ec, 3, 2}, {0x2258, 3, 2},   /* MEMORY_CLUSTER1_CPUn_OPTION */
+        {0x2384, 3, 2},                     /* MEMORY_CLUSTER1_NONCPU_OPTION */
+    };
+    for (int i = 0; i < 6; i++) {
+        u64 a = 0x14060000UL + m3def[i][0];
+        u32 b = safe_rd32(a);
+        safe_wr32(a, (b & ~m3def[i][1]) | m3def[i][2]);
+        kvh("  PMU+", m3def[i][0], "  ", b);
+        kvh("     -> ", safe_rd32(a), "", 0);
+    }
+#endif
 #ifdef BIGTEST2
     // t11: Samsung's flexpmu core10_on first (big core 0 = bit 0):
     // GRP2_INTR_BID_ENABLE clear, pending clear, PMU event enable clear

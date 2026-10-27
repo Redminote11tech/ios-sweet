@@ -268,12 +268,18 @@ big_entry:
         and     x10, x0, #3
         mrs     x1, CurrentEL
         ldr     x6, big_mb
-        add     x6, x6, x10, lsl #4
+        add     x6, x6, x10, lsl #5
         movz    w3, #0xb16c, lsl #16
         orr     w3, w3, w1
         str     w3, [x6]
         mrs     x1, mpidr_el1
         str     w1, [x6, #4]
+        mrs     x1, midr_el1
+        str     w1, [x6, #12]
+        mrs     x1, id_aa64isar0_el1
+        str     x1, [x6, #16]
+        mrs     x1, id_aa64mmfr1_el1
+        str     x1, [x6, #24]
         dsb     sy
         ldr     x7, big_fb
         mov     x8, #5760
