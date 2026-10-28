@@ -1,0 +1,22 @@
+name: static-wallpaper
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/wallpaper-isolated]
+    paths: ['s9/static-wallpaper/**', '.github/workflows/static-wallpaper.yml']
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and sign wallpaper helper
+        run: |
+          mkdir -p wallpaper-out
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -Os -Wall -Wextra -fobjc-arc -dynamiclib -framework Foundation -framework UIKit -o wallpaper-out/S9Wallpaper.dylib s9/static-wallpaper/S9Wallpaper.m
+          codesign -f -s - wallpaper-out/S9Wallpaper.dylib
+          codesign --verify --strict wallpaper-out/S9Wallpaper.dylib
+          shasum -a 256 wallpaper-out/S9Wallpaper.dylib > wallpaper-out/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-wallpaper
+          path: wallpaper-out/
