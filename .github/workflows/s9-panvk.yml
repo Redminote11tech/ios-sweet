@@ -28,16 +28,25 @@ jobs:
           git -C mesa fetch --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git fc8ba4378f37c152e0443dadcb9384a7da0cad4a
           git -C mesa checkout --detach FETCH_HEAD
           test "$(git -C mesa rev-parse HEAD)" = fc8ba4378f37c152e0443dadcb9384a7da0cad4a
+      - name: iOS diagnostic and synchronization tests
+        run: |
+          mkdir -p out
+          cc -O2 -Wall -Wextra -Werror -pthread s9/panvk/test-sync.c -o out/test-sync
+          out/test-sync | tee out/sync-test.log
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" -Imesa/include -O2 -Wall -Wextra -Werror -Wl,-fixup_chains s9/panvk/vkprobe.c -o out/vkprobe
+          codesign -f -s - out/vkprobe
       - name: Native shader generators
         run: |
           set -o pipefail
           mkdir -p out
+          export CC=clang CXX=clang++
           export PKG_CONFIG_PATH="$(brew --prefix llvm)/lib/pkgconfig:$(brew --prefix spirv-tools)/lib/pkgconfig:$(brew --prefix spirv-llvm-translator)/lib/pkgconfig"
           meson setup build-host mesa --buildtype=release -Db_ndebug=true \
             -Dplatforms= -Dgallium-drivers= -Dvulkan-drivers= -Dtools=panfrost \
             -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false \
             -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled -Dmesa-clc=enabled \
-            -Dprecomp-compiler=enabled -Dpanfrost-rust=false -Dpanfrost-disassemble=false \
+            -Dprecomp-compiler=enabled -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true -Dpanfrost-rust=false -Dpanfrost-disassemble=false \
             -Dbuild-tests=false -Dshader-cache=disabled -Dxmlconfig=disabled \
             -Dcmake_prefix_path="$(brew --prefix llvm)" 2>&1 | tee out/host-configure.log
           ninja -C build-host -j3 src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile 2>&1 | tee out/host-build.log
