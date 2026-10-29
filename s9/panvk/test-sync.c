@@ -33,5 +33,8 @@ int main(void){
  table[1].signaled=0;
  assert(drmSyncobjSignal(0,bad,2)==-EINVAL && table[1].signaled==0);
  assert(drmSyncobjTimelineSignal(0,NULL,NULL,0)==-ENOTSUP);
+ table[1].signaled=1;
+ assert(drmSyncobjReset(0,bad,2)==-EINVAL && table[1].signaled==1);
+ assert(drmSyncobjReset(0,h,2)==0 && !table[0].seq && !table[1].signaled);
  puts("PASS: wait-any, wait-all, timeout, invalid handles, delayed CPU signal, atomic rejection, native timeline refusal");
 }

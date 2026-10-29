@@ -301,7 +301,7 @@ static int clear_test(VkInstance inst, VkPhysicalDevice pd, uint32_t qfam)
 	DGET(vkMapMemory); DGET(vkCreateCommandPool); DGET(vkAllocateCommandBuffers); DGET(vkBeginCommandBuffer);
 	DGET(vkCmdPipelineBarrier); DGET(vkCmdClearColorImage); DGET(vkCmdCopyImageToBuffer); DGET(vkEndCommandBuffer);
 	DGET(vkCreateFence); DGET(vkQueueSubmit); DGET(vkWaitForFences); DGET(vkDestroyDevice);
-	DGET(vkInvalidateMappedMemoryRanges);
+	DGET(vkInvalidateMappedMemoryRanges); DGET(vkFlushMappedMemoryRanges);
 
 	VkPhysicalDeviceMemoryProperties mp;
 	vkGetPhysicalDeviceMemoryProperties(pd, &mp);
@@ -318,6 +318,7 @@ static int clear_test(VkInstance inst, VkPhysicalDevice pd, uint32_t qfam)
 	VkMemoryRequirements imr;
 	vkGetImageMemoryRequirements(dev, img, &imr);
 	int it = find_mem(&mp, imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (it < 0) { R("FAIL clear: no image memory type\n"); goto out; }
 	VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = imr.size, .memoryTypeIndex = (uint32_t)it };
 	VkDeviceMemory imem;
 	CHECK(vkAllocateMemory(dev, &mai, NULL, &imem));
@@ -329,6 +330,7 @@ static int clear_test(VkInstance inst, VkPhysicalDevice pd, uint32_t qfam)
 	VkMemoryRequirements bmr;
 	vkGetBufferMemoryRequirements(dev, buf, &bmr);
 	int bt = find_mem(&mp, bmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+	if (bt < 0) { R("FAIL clear: no host-visible readback memory\n"); goto out; }
 	VkMemoryAllocateInfo bai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = bmr.size, .memoryTypeIndex = (uint32_t)bt };
 	VkDeviceMemory bmem;
 	CHECK(vkAllocateMemory(dev, &bai, NULL, &bmem));
@@ -336,6 +338,8 @@ static int clear_test(VkInstance inst, VkPhysicalDevice pd, uint32_t qfam)
 	uint32_t *px;
 	CHECK(vkMapMemory(dev, bmem, 0, VK_WHOLE_SIZE, 0, (void **)&px));
 	memset(px, 0xcd, W * H * 4);
+	VkMappedMemoryRange mr = { .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = bmem, .size = VK_WHOLE_SIZE };
+	CHECK(vkFlushMappedMemoryRanges(dev, 1, &mr));
 
 	VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qfam };
 	VkCommandPool pool;
@@ -373,8 +377,7 @@ static int clear_test(VkInstance inst, VkPhysicalDevice pd, uint32_t qfam)
 	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
 	CHECK(vkQueueSubmit(q, 1, &si, fence));
 	CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 5ull * 1000 * 1000 * 1000));
-	VkMappedMemoryRange mr = { .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = bmem, .size = VK_WHOLE_SIZE };
-	vkInvalidateMappedMemoryRanges(dev, 1, &mr);
+	CHECK(vkInvalidateMappedMemoryRanges(dev, 1, &mr));
 	/* 0.25 -> 64 (0x40), 0.5 -> 128 (0x80), 0.75 -> 191 (0xbf), 1.0 -> 255: RGBA little-endian 0xffbf8040 (UNORM rounding: 0x3f..0x41 accepted) */
 	uint32_t bad = 0;
 	for (uint32_t i = 0; i < W * H; i++) {

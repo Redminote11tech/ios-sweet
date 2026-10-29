@@ -88,3 +88,24 @@ int drmSyncobjQuery2(int fd, uint32_t *h, uint64_t *p, uint32_t n, uint32_t flag
     (void)fd; (void)h; (void)p; (void)n; (void)flags;
     errno = ENOTSUP; return -ENOTSUP;
 }
+
+int
+drmSyncobjReset(int fd, const uint32_t *handles, uint32_t count)
+{
+    (void)fd;
+    if (!handles && count) { errno = EINVAL; return -EINVAL; }
+    pthread_mutex_lock(&lock);
+    for (uint32_t i = 0; i < count; i++) {
+        if (!ssync(handles[i])) {
+            pthread_mutex_unlock(&lock);
+            errno = EINVAL; return -EINVAL;
+        }
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        struct ssync *s = ssync(handles[i]);
+        s->seq = 0;
+        s->signaled = 0;
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
+}

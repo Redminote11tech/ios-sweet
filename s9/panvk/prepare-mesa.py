@@ -39,11 +39,30 @@ print('Darwin build integration applied; host image import still pending.')
 
 # PanVK-only synchronization corrections; do not alter the working GL bridge.
 p=d/'sweet_drm.c';s=p.read_text()
-a=s.index('int\ndrmSyncobjWait(');b=s.index('int\ndrmSyncobjTimelineWait(',a)
+a=s.index('int\ndrmSyncobjReset(');b=s.index('int\ndrmSyncobjTimelineWait(',a)
 s=s[:a]+'#include "sync-wait.inc"\n\n'+s[b:]
 s=s.replace('\t(void)points;\n\treturn drmSyncobjWait', '\tfor (unsigned i = 0; i < count; i++) {\n\t\tif (points[i]) { errno = ENOTSUP; return -ENOTSUP; }\n\t}\n\treturn drmSyncobjWait')
 s=s.replace('\t(void)dst_point;\n\t(void)src_point;\n\t(void)flags;', '\tif (dst_point || src_point || flags) { errno = ENOTSUP; return -ENOTSUP; }')
-s=s.replace('\t\tfence_wait(seq, 2000);','\t\tif (!s) return -EINVAL;\n\t\tint err = fence_wait(seq, 2000);\n\t\tif (err) return err;')
+old = '\t\tuint32_t seq = s ? s->seq : 0;\n\t\tpthread_mutex_unlock(&lock);\n\t\tfence_wait(seq, 2000);'
+new = '\t\tuint32_t seq = s ? s->seq : 0;\n\t\tint valid = s && (s->seq || s->signaled);\n\t\tpthread_mutex_unlock(&lock);\n\t\tif (!valid) return -EINVAL;\n\t\tint err = fence_wait(seq, 2000);\n\t\tif (err) return err;'
+assert s.count(old) == 1
+s = s.replace(old, new)
+# JM queues use raw ioctls as well as libdrm entry points for fence transfers.
+old = '\tif (request == DRM_IOCTL_GEM_CLOSE) {'
+new = '''\tif (request == DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD) {
+        struct drm_syncobj_handle *h = arg;
+        ret = h->flags == DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
+            ? drmSyncobjExportSyncFile(fd, h->handle, &h->fd) : -ENOTSUP;
+    } else if (request == DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE) {
+        struct drm_syncobj_handle *h = arg;
+        ret = h->flags == DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE
+            ? drmSyncobjImportSyncFile(fd, h->handle, h->fd) : -ENOTSUP;
+    } else if (request == DRM_IOCTL_SYNCOBJ_RESET) {
+        struct drm_syncobj_array *a = arg;
+        ret = a->pad ? -EINVAL : drmSyncobjReset(fd, (const uint32_t *)(uintptr_t)a->handles, a->count_handles);
+    } else if (request == DRM_IOCTL_GEM_CLOSE) {'''
+assert s.count(old) == 1
+s = s.replace(old, new)
 s=s.replace('\t(void)capability;\n\t*value = 0;\n\treturn -EINVAL;', '\tif (capability == DRM_CAP_SYNCOBJ) { *value = 1; return 0; }\n\tif (capability == DRM_CAP_SYNCOBJ_TIMELINE) { *value = 0; return 0; }\n\t*value = 0;\n\terrno = EINVAL; return -EINVAL;')
 # Empty/invalid fences must not turn into an already-completed fence.
 old = "\tuint32_t seq = s ? s->seq : 0;\n\tpthread_mutex_unlock(&lock);\n\tif (!s) {\n\t\treturn -EINVAL;\n\t}\n\t*sync_file_fd"
