@@ -1,6 +1,9 @@
 name: s9-panvk
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/panvk-bringup]
+    paths: ["s9/panvk/**", ".github/workflows/s9-panvk.yml"]
 permissions:
   contents: read
 jobs:
