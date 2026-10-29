@@ -45,6 +45,15 @@ s=s.replace('\t(void)points;\n\treturn drmSyncobjWait', '\tfor (unsigned i = 0; 
 s=s.replace('\t(void)dst_point;\n\t(void)src_point;\n\t(void)flags;', '\tif (dst_point || src_point || flags) { errno = ENOTSUP; return -ENOTSUP; }')
 s=s.replace('\t\tfence_wait(seq, 2000);','\t\tif (!s) return -EINVAL;\n\t\tint err = fence_wait(seq, 2000);\n\t\tif (err) return err;')
 s=s.replace('\t(void)capability;\n\t*value = 0;\n\treturn -EINVAL;', '\tif (capability == DRM_CAP_SYNCOBJ) { *value = 1; return 0; }\n\tif (capability == DRM_CAP_SYNCOBJ_TIMELINE) { *value = 0; return 0; }\n\t*value = 0;\n\terrno = EINVAL; return -EINVAL;')
+# Empty/invalid fences must not turn into an already-completed fence.
+old = "\tuint32_t seq = s ? s->seq : 0;\n\tpthread_mutex_unlock(&lock);\n\tif (!s) {\n\t\treturn -EINVAL;\n\t}\n\t*sync_file_fd"
+new = "\tuint32_t seq = s ? s->seq : 0;\n\tint valid = s && (s->seq || s->signaled);\n\tpthread_mutex_unlock(&lock);\n\tif (!valid) {\n\t\terrno = EINVAL; return -EINVAL;\n\t}\n\t*sync_file_fd"
+assert s.count(old) == 1
+s = s.replace(old, new)
+old = "\tif (s) {\n\t\ts->seq = f ? f->value : 0;\n\t\ts->signaled = s->seq == 0;\n\t}\n\tpthread_mutex_unlock(&lock);\n\treturn s ? 0 : -EINVAL;"
+new = "\tint valid = s && (f || sync_file_fd == -1);\n\tif (valid) {\n\t\ts->seq = f ? f->value : 0;\n\t\ts->signaled = s->seq == 0;\n\t}\n\tpthread_mutex_unlock(&lock);\n\tif (!valid) { errno = EINVAL; return -EINVAL; }\n\treturn 0;"
+assert s.count(old) == 1
+s = s.replace(old, new)
 p.write_text(s);shutil.copy(h/'sync-wait.inc',d/'sync-wait.inc')
 
 # Discover the real SweetGPU service instead of probing Linux DRM nodes.

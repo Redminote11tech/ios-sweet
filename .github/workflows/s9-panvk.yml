@@ -36,7 +36,14 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" -Imesa/include -O2 -Wall -Wextra -Werror -Wl,-fixup_chains s9/panvk/vkprobe.c -o out/vkprobe
           codesign -f -s - out/vkprobe
+      - name: Restore native shader tools
+        id: native-tools
+        uses: actions/cache/restore@v4
+        with:
+          path: native-bin
+          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v1
       - name: Native shader generators
+        if: steps.native-tools.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
           mkdir -p out
@@ -52,11 +59,19 @@ jobs:
           ninja -C build-host -j3 src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile 2>&1 | tee out/host-build.log
           mkdir -p native-bin
           cp build-host/src/compiler/clc/mesa_clc build-host/src/compiler/spirv/vtn_bindgen2 build-host/src/panfrost/clc/panfrost_compile native-bin/
-          echo "$PWD/native-bin" >> "$GITHUB_PATH"
+      - name: Save native shader tools
+        if: steps.native-tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: native-bin
+          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v1
+      - name: Shader tool path
+        run: echo "$PWD/native-bin" >> "$GITHUB_PATH"
       - name: iOS PanVK and probe
         run: |
           set -o pipefail
           python3 s9/panvk/prepare-mesa.py mesa
+          python3 s9/panvk/test-syncfile.py mesa/src/s9-drm/sweet_drm.c | tee out/syncfile-test.log
           bash s9/panvk/build-ios.sh mesa out 2>&1 | tee out/ios-build.log
       - uses: actions/upload-artifact@v4
         if: always()

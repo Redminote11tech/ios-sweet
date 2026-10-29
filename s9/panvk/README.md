@@ -65,11 +65,32 @@ all shaders work. The --clear flag submits work only to the explicitly loaded
 Vulkan driver. Never report the host GPU's result as an S9 result.
 
 Validation so far: host compilation with warnings-as-errors passed; absent ICD
-exits2; host RADV enumerates zero devices and exits2. No S9 Vulkan test or iOS
-cross-build has passed yet. This is diagnostic groundwork, not GPU support.
+exits2; host RADV enumerates zero devices and exits2. The standalone iOS diagnostic cross-build and macOS binary-sync tests now pass
+in CI40890094548. The PanVK driver build is still in progress; no S9 Vulkan test
+has passed. This is diagnostic groundwork, not GPU support.
 
 Sources:
 - https://github.com/akshaynexus/iOSPlus10/blob/167f7d8edb5089ab5cf0daa7ffa83bdf29916f60/docs/metal-design.md
 - https://github.com/steelbrain/metal2vulkan
 - https://docs.mesa3d.org/drivers/panfrost.html
 - https://gitlab.freedesktop.org/mesa/mesa/-/commit/fc8ba4378f37c152e0443dadcb9384a7da0cad4a
+
+
+## Memory correctness gate before device testing
+
+SweetGPU selector10 maps CPU-cached memory; its GPU mappings are noncoherent.
+Mesa's Linux panfrost1.1 path instead assumes uncached/coherent host memory.
+The current shim still reports1.1, so its advertised HOST_COHERENT type needs
+correction before this driver is installable. Do not bump the DRM version to
+pretend that the missing1.6 cache-sync ioctl exists.
+
+Selector16 flushes physical pages after checking the BO's last submission is
+complete. It is a possible implementation component for PANFROST_SYNC_BO, but
+range validation, concurrent CPU/GPU access, cached memory-type selection and
+both CPU-to-GPU/GPU-to-CPU tests remain required. Ordinary Vulkan coherence
+must be correct before adding external host-memory/IOSurface imports.
+
+Sync-file import now rejects unknown descriptors instead of treating them as
+completed; exporting an empty syncobj fails. Tests exercise generated adapter
+functions, including the documented -1 already-signaled import sentinel.
+These host tests do not establish GPU completion or cache coherency.
