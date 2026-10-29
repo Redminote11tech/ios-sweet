@@ -1,0 +1,60 @@
+name: s9-panvk
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tools
+        run: |
+          pip install meson ninja mako pyyaml packaging pycparser
+          brew install llvm spirv-tools spirv-llvm-translator bison flex pkgconf
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+      - name: Pinned Mesa source
+        run: |
+          git init -q mesa
+          git -C mesa fetch --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git fc8ba4378f37c152e0443dadcb9384a7da0cad4a
+          git -C mesa checkout --detach FETCH_HEAD
+          test "$(git -C mesa rev-parse HEAD)" = fc8ba4378f37c152e0443dadcb9384a7da0cad4a
+      - name: Native shader generators
+        run: |
+          set -o pipefail
+          mkdir -p out
+          export PKG_CONFIG_PATH="$(brew --prefix llvm)/lib/pkgconfig:$(brew --prefix spirv-tools)/lib/pkgconfig:$(brew --prefix spirv-llvm-translator)/lib/pkgconfig"
+          meson setup build-host mesa --buildtype=release -Db_ndebug=true \
+            -Dplatforms= -Dgallium-drivers= -Dvulkan-drivers= -Dtools=panfrost \
+            -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false \
+            -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled -Dmesa-clc=enabled \
+            -Dprecomp-compiler=enabled -Dpanfrost-rust=false -Dpanfrost-disassemble=false \
+            -Dbuild-tests=false -Dshader-cache=disabled -Dxmlconfig=disabled \
+            -Dcmake_prefix_path="$(brew --prefix llvm)" 2>&1 | tee out/host-configure.log
+          ninja -C build-host -j3 src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile 2>&1 | tee out/host-build.log
+          mkdir -p native-bin
+          cp build-host/src/compiler/clc/mesa_clc build-host/src/compiler/spirv/vtn_bindgen2 build-host/src/panfrost/clc/panfrost_compile native-bin/
+          echo "$PWD/native-bin" >> "$GITHUB_PATH"
+      - name: iOS PanVK and probe
+        run: |
+          set -o pipefail
+          python3 s9/panvk/prepare-mesa.py mesa
+          bash s9/panvk/build-ios.sh mesa out 2>&1 | tee out/ios-build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s9-panvk-build
+          path: |
+            out/*.log
+            out/*.txt
+            out/*.dylib
+            out/vkprobe
+            out/SHA256SUMS
+            out/build-ios/meson-logs/meson-log.txt
+            build-host/meson-logs/meson-log.txt
