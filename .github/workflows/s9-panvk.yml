@@ -41,13 +41,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: native-bin
-          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v1
+          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v2
       - name: Native shader generators
         if: steps.native-tools.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
           mkdir -p out
+          python3 s9/panvk/prepare-host.py mesa
           export CC=clang CXX=clang++
+          # Shared headers describe types only; native tools never open a GPU.
+          export CFLAGS="-I$PWD/s9/panvk/include"
+          export CXXFLAGS="$CFLAGS"
           export PKG_CONFIG_PATH="$(brew --prefix llvm)/lib/pkgconfig:$(brew --prefix spirv-tools)/lib/pkgconfig:$(brew --prefix spirv-llvm-translator)/lib/pkgconfig"
           meson setup build-host mesa --buildtype=release -Db_ndebug=true \
             -Dplatforms= -Dgallium-drivers= -Dvulkan-drivers= -Dtools=panfrost \
@@ -64,12 +68,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: native-bin
-          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v1
+          key: s9-panvk-native-macos15-intel-mesa-fc8ba437-llvm22-v2
       - name: Shader tool path
         run: echo "$PWD/native-bin" >> "$GITHUB_PATH"
       - name: iOS PanVK and probe
         run: |
           set -o pipefail
+          # Restore the device library dependency for the actual iOS driver.
+          git -C mesa restore src/panfrost/lib/meson.build
           python3 s9/panvk/prepare-mesa.py mesa
           python3 s9/panvk/test-syncfile.py mesa/src/s9-drm/sweet_drm.c | tee out/syncfile-test.log
           bash s9/panvk/build-ios.sh mesa out 2>&1 | tee out/ios-build.log
