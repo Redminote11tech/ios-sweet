@@ -152,3 +152,52 @@ for name in ['memoryMapPlaced','memoryUnmapReserve']:
  old='      .'+name+' = true,';assert s.count(old)==1,name
  s=s.replace(old,'#ifndef __APPLE__\n'+old+'\n#endif')
 p.write_text(s)
+
+# Darwin has no sys/sysmacros.h; major()/minor() come from sys/types.h.
+edit('src/panfrost/vulkan/panvk_vX_physical_device.c',
+ '#include <sys/sysmacros.h>',
+ '#ifdef __APPLE__\n#include <sys/types.h>\n#else\n#include <sys/sysmacros.h>\n#endif')
+
+# Performance counters: SweetGPU has no PERFCNT ioctls and Darwin has no
+# eventfd/timerfd/sched_setscheduler. Refuse perf sessions up front; the
+# stubs below only keep the (now unreachable) Linux session code compiling.
+edit('src/panfrost/lib/kmod/panfrost_kmod.c',
+ '#include <sys/eventfd.h>\n#include <sys/timerfd.h>\n',
+ '''#ifdef __APPLE__
+#include <sched.h>
+#include <time.h>
+typedef uint64_t eventfd_t;
+struct s9_itimerspec { struct timespec it_interval, it_value; };
+#define itimerspec s9_itimerspec
+#define TFD_CLOEXEC 0
+#define eventfd(v, f) (errno = ENOTSUP, -1)
+#define eventfd_write(fd, v) (errno = ENOTSUP, -1)
+#define eventfd_read(fd, v) (errno = ENOTSUP, -1)
+#define timerfd_create(c, f) (errno = ENOTSUP, -1)
+#define timerfd_settime(fd, f, n, o) (errno = ENOTSUP, -1)
+#define sched_setscheduler(p, pol, prm) (errno = ENOTSUP, -1)
+#else
+#include <sys/eventfd.h>
+#include <sys/timerfd.h>
+#endif
+''')
+edit('src/panfrost/lib/kmod/panfrost_kmod.c',
+ '   struct panfrost_kmod_perf_session *session;\n\n   session = pan_kmod_dev_alloc(dev, sizeof(*session));',
+ '''   struct panfrost_kmod_perf_session *session;
+
+#ifdef __APPLE__
+   (void)caps;
+   (void)backend;
+   mesa_logw("SweetGPU: performance counters are not supported");
+   return NULL;
+#endif
+   session = pan_kmod_dev_alloc(dev, sizeof(*session));''')
+
+# libdrm device enumeration / timeline entry points referenced by the common
+# Vulkan runtime: answer "unsupported" explicitly instead of leaving strong
+# undefined symbols in the dylib.
+shutil.copy(h/'drm-stubs.c',d/'drm-stubs.c')
+edit('src/panfrost/vulkan/meson.build',
+ "files('../../s9-drm/sweet_drm.c', '../../s9-drm/log.c')",
+ "files('../../s9-drm/sweet_drm.c', '../../s9-drm/log.c', '../../s9-drm/drm-stubs.c')")
+print('Darwin guards: sysmacros, perf-counter fds, libdrm enumeration stubs.')

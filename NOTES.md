@@ -431,3 +431,4 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+- 2026-10-30: CI40893140702 got past native tools (cache v2 saved) and failed at first iOS TU: panfrost_kmod.c needs sys/eventfd.h. Darwin guards + libdrm enumeration stubs + ninja -k 0 added (see s9/NOTES.md). Phone untouched.
