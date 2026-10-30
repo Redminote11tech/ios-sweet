@@ -201,3 +201,12 @@ edit('src/panfrost/vulkan/meson.build',
  "files('../../s9-drm/sweet_drm.c', '../../s9-drm/log.c')",
  "files('../../s9-drm/sweet_drm.c', '../../s9-drm/log.c', '../../s9-drm/drm-stubs.c')")
 print('Darwin guards: sysmacros, perf-counter fds, libdrm enumeration stubs.')
+
+# PanVK picks every image layout (linear, u-interleaved, AFBC) through
+# vk_image::drm_format_mod, which the common runtime only defines on
+# Linux/BSD. The modifier is a layout key here; no DRM buffer sharing implied.
+for path, n in [('src/vulkan/runtime/vk_image.h', 1), ('src/vulkan/runtime/vk_image.c', 3)]:
+ p=m/path;s=p.read_text();old='#if DETECT_OS_LINUX || DETECT_OS_BSD'
+ assert s.count(old)==n,(path,s.count(old))
+ p.write_text(s.replace(old,'#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE'))
+print('vk_image drm_format_mod enabled for Darwin layout selection.')
